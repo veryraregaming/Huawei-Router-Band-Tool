@@ -1,0 +1,97 @@
+# Huawei Band Optimiser
+
+A powerful tool for Huawei CPE Pro 2 routers that optimises band selection to maximise signal quality and internet speeds.
+
+## Features
+
+- **Band Optimisation:** Automatically tests all available bands and recommends the best combination based on signal quality
+- **Enhanced Optimisation:** Combines signal quality metrics with speed tests for the most accurate recommendations
+- **Speed Testing:** Built-in speed testing using the speedtest.net API
+- **Signal Monitoring:** Real-time monitoring of signal metrics including RSRP, SINR, RSRQ
+- **User-friendly Interface:** Clean, intuitive Tkinter interface with detailed and standard logging views
+- **Band Configuration:** Manually select bands or use the optimisation recommendations
+- **Reporting:** Generates detailed optimisation reports for future reference
+
+## Installation
+
+1. Make sure you have Python 3.7+ installed
+2. Clone this repository:
+   ```
+   git clone https://github.com/yourusername/huawei-band-optimizer.git
+   cd huawei-band-optimizer
+   ```
+3. Install the required dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+
+## Usage
+
+Run the application:
+```
+python main.py
+```
+
+### Connecting to your router
+
+1. Enter your router's IP address (default: 192.168.1.1)
+2. Enter your username and password
+3. Click "Connect"
+
+### Optimising Bands
+
+1. Click "Optimise Bands" to test signal quality on all available bands
+2. Review the results in the summary dialogue
+3. Click "Apply These Settings" to use the recommended band configuration
+
+### Enhanced Optimisation
+
+1. Click "Enhanced Optimise" to run a comprehensive test that includes speed tests
+2. Wait for the tests to complete (this may take several minutes)
+3. Review the detailed results and apply if desired
+
+### Speed Testing
+
+Click "Speed Test" to run a standalone speed test using your current band configuration.
+
+## Configuration
+
+The application saves your preferences in a `config.json` file, including:
+- Router IP address
+- Login credentials
+- Auto-connect setting
+- Speedtest on startup preference
+
+## Troubleshooting
+
+- **API Restrictions:** Some carrier-locked routers may have API restrictions that limit functionality
+- **Connection Issues:** Ensure your router is reachable at the specified IP
+- **Speedtest Failures:** Check your internet connection or try again later
+
+## Licence
+
+[MIT Licence](LICENCE)
+
+## Acknowledgements
+
+- [speedtest-cli](https://github.com/sivel/speedtest-cli) for speed testing functionality
+- [huawei-lte-api](https://github.com/Salamek/huawei-lte-api) for advanced Huawei router API access 
+
+## Support the Project
+
+If you find this tool helpful and would like to support its development, you can make a donation. Your support helps maintain and improve the project!
+
+<style>.pp-HLVZ82C6FKM2E{text-align:center;border:none;border-radius:0.25rem;min-width:11.625rem;padding:0 2rem;height:2.625rem;font-weight:bold;background-color:#FFD140;color:#000000;font-family:"Helvetica Neue",Arial,sans-serif;font-size:1rem;line-height:1.25rem;cursor:pointer;}</style>
+<form action="https://www.paypal.com/ncp/payment/HLVZ82C6FKM2E" method="post" target="_blank" style="display:inline-grid;justify-items:center;align-content:start;gap:0.5rem;">
+  <input class="pp-HLVZ82C6FKM2E" type="submit" value="Donate" />
+  <img src=https://www.paypalobjects.com/images/Debit_Credit_APM.svg alt="cards" />
+  <section> Powered by <img src="https://www.paypalobjects.com/paypal-ui/logos/svg/paypal-wordmark-color.svg" alt="paypal" style="height:0.875rem;vertical-align:middle;"/></section>
+</form>
+
+Your support helps:
+- Maintain and improve the application
+- Add new features and optimizations
+- Keep the project up to date with router firmware changes
+- Provide better documentation and support
+
+Thank you for your support! 💖 
