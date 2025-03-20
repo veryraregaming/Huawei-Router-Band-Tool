@@ -41,6 +41,10 @@ try:
 except ImportError:
     HUAWEI_API_AVAILABLE = False
 
+# Define supported bands lists for fallback when scanning fails
+SUPPORTED_4G_BANDS = ["B1", "B3", "B7", "B8", "B20", "B28", "B32", "B38", "B40", "B41", "B42"]
+SUPPORTED_5G_BANDS = ["n1", "n3", "n28", "n41", "n78", "n79"]
+
 # Theoretical maximum speeds by band and network type
 THEORETICAL_SPEEDS = {
     # Network type: {band: (max_download_mbps, max_upload_mbps)}
@@ -777,7 +781,16 @@ def apply_band_lock(session, ip, token, selected_bands):
     if isinstance(session, Client):
         try:
             # Convert selected bands to LTE band hex format
-            band_numbers = [int(band[1:]) for band in selected_bands if isinstance(band, str) and band.startswith("B")]
+            band_numbers = []
+            for band in selected_bands:
+                if isinstance(band, str):
+                    if band.startswith("B"):
+                        band_numbers.append(int(band[1:]))
+                    elif band.isdigit():
+                        band_numbers.append(int(band))
+                elif isinstance(band, int):
+                    band_numbers.append(band)
+            
             band_hex = sum(BAND_MAP.get(num, 0) for num in band_numbers) or 0x3FFFFFFF  # Default to all bands if none selected
             band_hex_str = format(band_hex, 'X')
             
@@ -857,9 +870,11 @@ def run_speedtest(server_id=None):
         # Get results
         results = s.results.dict()
         return {
+            'success': True,
             'download': results['download'] / 1_000_000,  # Convert to Mbps
             'upload': results['upload'] / 1_000_000,
-            'ping': results['ping']
+            'ping': results['ping'],
+            'server': results.get('server', {}).get('name', 'Unknown')
         }
     except Exception as e:
         if "Malformed speedtest.net configuration" in str(e):
@@ -876,13 +891,21 @@ def run_speedtest(server_id=None):
                     s.upload()
                     results = s.results.dict()
                     return {
+                        'success': True,
                         'download': results['download'] / 1_000_000,
                         'upload': results['upload'] / 1_000_000,
-                        'ping': results['ping']
+                        'ping': results['ping'],
+                        'server': results.get('server', {}).get('name', 'Unknown')
                     }
             except Exception as retry_error:
-                raise Exception(f"Speed test failed after retry: {str(retry_error)}")
-        raise Exception(f"Speed test failed: {str(e)}")
+                return {
+                    'success': False,
+                    'message': f"Speed test failed after retry: {str(retry_error)}"
+                }
+        return {
+            'success': False,
+            'message': f"Speed test failed: {str(e)}"
+        }
 
 # Create reports directory if not exists
 def ensure_reports_dir():
@@ -1015,6 +1038,8 @@ class BandOptimiserApp:
         self.router_ip = tk.StringVar(value=self.config.get("router_ip", ""))
         self.username = tk.StringVar(value=self.config.get("username", ""))
         self.password = tk.StringVar(value=self.config.get("password", ""))
+        
+        # Router connection settings
         self.auto_connect = tk.BooleanVar(value=self.config.get("auto_connect", False))
         self.use_api_lib = tk.BooleanVar(value=self.config.get("use_api_lib", True))
         self.speedtest_on_startup = tk.BooleanVar(value=self.config.get("speedtest_on_startup", False))
@@ -1024,25 +1049,46 @@ class BandOptimiserApp:
         self.use_api_lib.trace_add("write", self.save_config_callback)
         self.speedtest_on_startup.trace_add("write", self.save_config_callback)
         
-        # Session state
+        # Session variables
         self.session = None
         self.token = None
+        self.client = None
         self.is_connected = False
-        self.api_restriction_warning_shown = False
-        self.poll_status_task = None
-        self.signal_update_interval = 5000  # ms
-        self.signal_data = {}
-        self.client = None  # For Huawei LTE API library
         
-        # Band selection variables
+        # UI state variables
+        self.status_var = tk.StringVar(value="Disconnected")
+        self.auto_refresh_timer_id = None
+        self.refresh_count = 0
+        self.api_restriction_warning_shown = False
+        
+        # Display variables (updated after signal refresh)
+        self.last_speedtest_time = 0
+        self.last_speedtest_dl = 0
+        self.last_speedtest_ul = 0
+        
+        # Available bands (will be populated on connection)
+        self.available_bands = {
+            "4G": SUPPORTED_4G_BANDS,
+            "5G": SUPPORTED_5G_BANDS
+        }
+        
+        # Band selection variables - will be populated dynamically
         self.band_vars = {}
-        for band in [1, 3, 7, 8, 20, 28, 32, 38, 40, 41, 42]:
-            self.band_vars[band] = tk.BooleanVar(value=f"B{band}" in self.config.get("selected_bands", []))
+        # Initialize 4G bands
+        for band_num in [1, 3, 7, 8, 20, 28, 32, 38, 40, 41, 42]:
+            band = f"B{band_num}"
+            self.band_vars[band] = tk.BooleanVar(value=band in self.config.get("selected_bands", []))
+        
+        # Initialize 5G bands
+        for band_num in [1, 3, 28, 41, 78, 79]:
+            band = f"n{band_num}"
+            self.band_vars[band] = tk.BooleanVar(value=band in self.config.get("selected_bands", []))
         
         # Network aggregation variables
         self.upload_band_vars = {}
         self.download_band_vars = {}
-        for band in [1, 3, 7, 8]:
+        for band_num in [1, 3, 7, 8]:
+            band = f"B{band_num}"
             self.upload_band_vars[band] = tk.BooleanVar(value=False)
             self.download_band_vars[band] = tk.BooleanVar(value=False)
         
@@ -1062,6 +1108,7 @@ class BandOptimiserApp:
         # Auto-connect if enabled
         if self.auto_connect.get():
             self.connect()
+            # The _run_initial_speedtest will be called in handle_connection_result if speedtest_on_startup is enabled
 
     def create_menu(self):
         # Create top menu
@@ -1080,6 +1127,7 @@ class BandOptimiserApp:
         menu_bar.add_cascade(label="Tools", menu=tools_menu)
         
         help_menu = tk.Menu(menu_bar, tearoff=0)
+        help_menu.add_command(label="How to Use", command=self.show_user_guide)
         help_menu.add_command(label="About", command=self.show_about)
         help_menu.add_command(label="Support the Project", command=self.show_donation_dialog)
         menu_bar.add_cascade(label="Help", menu=help_menu)
@@ -1109,16 +1157,21 @@ class BandOptimiserApp:
         options_frame = ttk.Frame(conn_frame)
         options_frame.grid(row=0, column=2, rowspan=3, padx=10)
         
-        ttk.Checkbutton(options_frame, text="Auto-connect at startup", variable=self.auto_connect).pack(anchor=tk.W, pady=2)
+        auto_connect_cb = ttk.Checkbutton(options_frame, text="Auto-connect at startup", variable=self.auto_connect)
+        auto_connect_cb.pack(anchor=tk.W, pady=2)
         
         if HUAWEI_API_AVAILABLE:
-            ttk.Checkbutton(options_frame, text="Use Huawei LTE API library", variable=self.use_api_lib).pack(anchor=tk.W, pady=2)
+            api_lib_cb = ttk.Checkbutton(options_frame, text="Use Huawei LTE API library", variable=self.use_api_lib)
+            api_lib_cb.pack(anchor=tk.W, pady=2)
             
-        ttk.Checkbutton(options_frame, text="Run Speedtest on Startup", variable=self.speedtest_on_startup).pack(anchor=tk.W, pady=2)
+        speedtest_startup_cb = ttk.Checkbutton(options_frame, text="Run Speedtest on Startup", variable=self.speedtest_on_startup)
+        speedtest_startup_cb.pack(anchor=tk.W, pady=2)
         
         # Connect button
         connect_button = ttk.Button(conn_frame, text="Connect", command=self.connect)
         connect_button.grid(row=0, column=3, rowspan=3, padx=10)
+        # Store as instance variable so it can be accessed elsewhere
+        self.connect_button = connect_button
         
         # Create tooltip for connect button
         if TOOLTIPS_AVAILABLE:
@@ -1173,45 +1226,37 @@ class BandOptimiserApp:
         bands_frame = ttk.LabelFrame(left_col, text="Band Selection & Management", padding="5")
         bands_frame.pack(fill=tk.BOTH, expand=True, pady=2)
         
-        # Remove tab control and place elements vertically
-        # Band Selection section
-        band_section = ttk.Frame(bands_frame)
-        band_section.pack(fill=tk.X, expand=True)
+        # Create notebook with tabs for 4G and 5G bands
+        band_notebook = ttk.Notebook(bands_frame)
+        band_notebook.pack(fill=tk.BOTH, expand=True)
         
-        # Create a grid of checkboxes for bands - more compact layout
-        band_layout = [
-            [(1, "B1"), (3, "B3"), (7, "B7"), (8, "B8")],
-            [(20, "B20"), (28, "B28"), (32, "B32"), (38, "B38")],
-            [(40, "B40"), (41, "B41"), (42, "B42"), None]
-        ]
+        # 4G Band tab
+        self.band_section_4g = ttk.Frame(band_notebook)
+        band_notebook.add(self.band_section_4g, text="4G Bands")
         
-        for row, band_row in enumerate(band_layout):
-            for col, band_info in enumerate(band_row):
-                if band_info:
-                    band_num, band_label = band_info
-                    checkbox = ttk.Checkbutton(band_section, text=band_label, 
-                                               variable=self.band_vars[band_num])
-                    checkbox.grid(row=row, column=col, sticky=tk.W, padx=2, pady=1)
+        # 5G Band tab
+        self.band_section_5g = ttk.Frame(band_notebook)
+        band_notebook.add(self.band_section_5g, text="5G Bands")
         
-        # More compact band buttons
-        band_buttons_frame = ttk.Frame(band_section)
-        band_buttons_frame.grid(row=len(band_layout), column=0, columnspan=4, pady=2)
+        # Create common button frame that applies to both tabs
+        band_buttons_frame = ttk.Frame(bands_frame)
+        band_buttons_frame.pack(fill=tk.X, pady=2)
         
-        select_all_button = ttk.Button(band_buttons_frame, text="Select All", 
-                                       command=lambda: self.toggle_all_bands(True),
-                                       width=12)
+        select_all_button = ttk.Button(band_buttons_frame, text="Select All Bands", 
+                                     command=lambda: self.toggle_all_bands(True),
+                                     width=15)
         select_all_button.pack(side=tk.LEFT, padx=2)
-        create_tooltip(select_all_button, "Select all available frequency bands for testing")
+        create_tooltip(select_all_button, "Select all available frequency bands (both 4G and 5G) for testing")
         
-        clear_all_button = ttk.Button(band_buttons_frame, text="Clear All", 
-                                      command=lambda: self.toggle_all_bands(False),
-                                      width=12)
+        clear_all_button = ttk.Button(band_buttons_frame, text="Clear All Bands", 
+                                    command=lambda: self.toggle_all_bands(False),
+                                    width=15)
         clear_all_button.pack(side=tk.LEFT, padx=2)
-        create_tooltip(clear_all_button, "Clear all band selections")
+        create_tooltip(clear_all_button, "Clear all band selections (both 4G and 5G)")
         
         apply_button = ttk.Button(band_buttons_frame, text="Apply Selection", 
-                                  command=self.apply_band_selection,
-                                  width=15)
+                                command=self.apply_band_selection,
+                                width=15)
         apply_button.pack(side=tk.LEFT, padx=2)
         create_tooltip(apply_button, "Apply the selected bands to your router - allows only the selected bands to be used")
         
@@ -1239,13 +1284,14 @@ class BandOptimiserApp:
         ttk.Label(agg_grid, text="Download band").grid(row=0, column=1, padx=5, pady=1)
         
         # Add band checkboxes in 2-column layout
-        for i, band in enumerate([1, 3, 7, 8]):
+        for i, band_num in enumerate([1, 3, 7, 8]):
+            band = f"B{band_num}"
             row = i + 1
-            upload_cb = ttk.Checkbutton(agg_grid, text=f"B{band}", 
+            upload_cb = ttk.Checkbutton(agg_grid, text=band, 
                                         variable=self.upload_band_vars[band])
             upload_cb.grid(row=row, column=0, sticky=tk.W, padx=5, pady=1)
             
-            download_cb = ttk.Checkbutton(agg_grid, text=f"B{band}", 
+            download_cb = ttk.Checkbutton(agg_grid, text=band, 
                                           variable=self.download_band_vars[band])
             download_cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=1)
         
@@ -1410,24 +1456,19 @@ class BandOptimiserApp:
         threading.Thread(target=connect_thread, daemon=True).start()
     
     def handle_connection_result(self, result, ip):
-        """Handle connection result from login_to_router"""
-        session_or_client, token, message = result
-        
-        if session_or_client:
-            # Store session/client and update UI
-            if HUAWEI_API_AVAILABLE and isinstance(session_or_client, Client):
-                self.client = session_or_client
+        """Handle connection result"""
+        if result[0]:
+            # Store the session object
+            if isinstance(result[0], Client):
+                self.client = result[0]
                 self.session = None
-                self.log_message(f"Login Successful (API) - {message}", log_type="both")
+                self.log_message("Connected using Huawei LTE API", log_type="both")
             else:
-                self.session = session_or_client
-                self.client = None
-                self.log_message(f"Login Successful - {message}", log_type="both")
+                self.session = result[0]
+                self.token = result[1]
+                self.log_message("Connected using web interface", log_type="both")
             
-            self.token = token
-            self.is_connected = True
-            
-            # Save connection details to config
+            # Store credentials in config
             self.config["router_ip"] = ip
             self.config["username"] = self.username.get()
             self.config["password"] = self.password.get()
@@ -1436,21 +1477,36 @@ class BandOptimiserApp:
             self.config["speedtest_on_startup"] = self.speedtest_on_startup.get()
             save_config(self.config)
             
-            # Initial signal refresh
+            # Update UI
+            self.is_connected = True
+            self.status_var.set("Connected")
+            self.connect_button.config(text="Disconnect")
+            
+            # Scan for available bands
+            self.log_message("Scanning for available bands...", log_type="both")
+            try:
+                self.available_bands = scan_available_bands(self.client or self.session, ip, self.token)
+                self.log_message(f"Available 4G bands: {', '.join(self.available_bands['4G'])}", log_type="both")
+                self.log_message(f"Available 5G bands: {', '.join(self.available_bands['5G'])}", log_type="both")
+                
+                # Update band selection UI with available bands
+                self.update_band_selection_ui()
+            except Exception as e:
+                self.log_message(f"Error scanning bands: {str(e)}", log_type="both")
+            
+            # Refresh signal data
             self.refresh_signal()
             
-            # Start auto-refresh if enabled
-            if self.auto_refresh_var.get():
-                self.toggle_auto_refresh()
-                
-            # Run initial speed test if enabled and speedtest-cli is available
-            if SPEEDTEST_AVAILABLE and self.speedtest_on_startup.get():
+            # Run initial speedtest if enabled
+            if self.speedtest_on_startup.get():
                 self._run_initial_speedtest()
         else:
-            self.log_message(f"Connection failed: {message}", log_type="both")
-            self.status_var.set("Disconnected")
+            # Connection failed
             self.is_connected = False
-            
+            self.status_var.set("Not Connected")
+            messagebox.showerror("Connection Failed", result[2])
+            self.log_message(f"Connection failed: {result[2]}", log_type="both")
+    
     def _run_initial_speedtest(self):
         """Run initial speed test after connection"""
         self.log_message("🚀 Starting speedtest.net measurement (will take 15-30 seconds)...", log_type="standard")
@@ -1557,6 +1613,27 @@ class BandOptimiserApp:
         # Check for multiple bands (indicating carrier aggregation)
         band_value = signal_data.get("BAND", "")
         network_type = signal_data.get("NETWORK_TYPE", "")
+        
+        # Parse the bands the router is currently connected to
+        current_bands = []
+        if band_value:
+            if "," in band_value:
+                current_bands = [b.strip() for b in band_value.split(",")]
+            else:
+                current_bands = [band_value.strip()]
+        
+        # Update the band_vars to reflect the current bands if we have the band checkboxes created
+        if hasattr(self, 'band_vars') and current_bands:
+            self.log_message(f"Syncing UI with currently connected bands: {', '.join(current_bands)}", log_type="detailed")
+            # First, clear all band selections
+            for band, var in self.band_vars.items():
+                var.set(False)
+            
+            # Then select the current bands
+            for band in current_bands:
+                if band in self.band_vars:
+                    self.band_vars[band].set(True)
+                    self.log_message(f"Selected band {band} in UI", log_type="detailed")
         
         # Check if router speed data should be used or preserved from a recent speedtest
         router_dl_speed = signal_data.get("DOWNLOAD", "--")
@@ -1740,10 +1817,27 @@ class BandOptimiserApp:
         # Implementation will be added here
         pass
     
-    def toggle_all_bands(self, state):
-        """Select or deselect all bands"""
-        for band_var in self.band_vars.values():
-            band_var.set(state)
+    def toggle_all_bands(self, state, band_type=None):
+        """Select or deselect all bands
+        
+        Args:
+            state: True to select all, False to deselect all
+            band_type: Optional, '4G' or '5G' to toggle only that type, or None for all bands
+        """
+        if band_type is None:
+            # Toggle all bands
+            for band, band_var in self.band_vars.items():
+                band_var.set(state)
+        elif band_type == '4G':
+            # Toggle only 4G bands (starting with 'B')
+            for band, band_var in self.band_vars.items():
+                if band.startswith('B'):
+                    band_var.set(state)
+        elif band_type == '5G':
+            # Toggle only 5G bands (starting with 'n')
+            for band, band_var in self.band_vars.items():
+                if band.startswith('n'):
+                    band_var.set(state)
     
     def optimise(self):
         """Optimise band selection based on signal strength"""
@@ -1758,7 +1852,7 @@ class BandOptimiserApp:
         original_band_config = []
         for band, var in self.band_vars.items():
             if var.get():
-                original_band_config.append(f"B{band}")
+                original_band_config.append(band)
         
         self.log_message(f"Current band config saved: {', '.join(original_band_config) if original_band_config else 'No bands'}", log_type="detailed")
         
@@ -1769,12 +1863,12 @@ class BandOptimiserApp:
                 # Test each band one by one
                 results = {}
                 
-                # Test each band one by one
-                bands_to_test = [1, 3, 7, 8, 20, 28, 32, 38, 40, 41, 42]
+                # Test each band one by one - use available bands
+                bands_to_test = self.available_bands["4G"]
                 
                 for band in bands_to_test:
-                    self.log_message(f"🔄 Testing band B{band}...", log_type="standard")
-                    self.log_message(f"Testing band B{band}...", log_type="detailed")
+                    self.log_message(f"🔄 Testing band {band}...", log_type="standard")
+                    self.log_message(f"Testing band {band}...", log_type="detailed")
                     
                     # Apply the band selection
                     apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, [band])
@@ -1786,12 +1880,12 @@ class BandOptimiserApp:
                     signal_data = fetch_signal_data(self, self.session or self.client, self.router_ip.get(), self.token)
                     
                     if not signal_data:
-                        self.log_message(f"⚠️ Failed to get signal data for band B{band}", log_type="both")
+                        self.log_message(f"⚠️ Failed to get signal data for band {band}", log_type="both")
                         results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
                         continue
                     
                     # Send to detailed log
-                    self.log_message(f"Band B{band} signal data: {signal_data}", log_type="detailed")
+                    self.log_message(f"Band {band} signal data: {signal_data}", log_type="detailed")
                     
                     # Get signal metrics
                     rsrp = signal_data.get("RSRP", "-120dBm")
@@ -1819,7 +1913,7 @@ class BandOptimiserApp:
                     
                     network_type = signal_data.get("NETWORK_TYPE", "4G")
                     
-                    # Store results
+                    # Store results - use band string as key
                     results[band] = {
                         "score": score,
                         "rsrp": rsrp_float,
@@ -1829,14 +1923,14 @@ class BandOptimiserApp:
                     }
                     
                     # Show simple result in log
-                    self.log_message(f"📊 Band B{band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
+                    self.log_message(f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
                 
                 # Generate report
                 report_path = generate_report(results, "basic")
 
                 # Find top bands
                 sorted_bands = sorted(results.items(), key=lambda x: x[1]["score"], reverse=True)
-                top_bands = [f"B{band}" for band, data in sorted_bands if data["score"] > 0][:3]
+                top_bands = [band for band, data in sorted_bands if data["score"] > 0][:3]
                 
                 if not top_bands:
                     self.log_message("⚠️ No usable bands found. Try again or check connection.", log_type="both")
@@ -1885,7 +1979,9 @@ class BandOptimiserApp:
             original_band_config = []
             for band, var in self.band_vars.items():
                 if var.get():
-                    original_band_config.append(f"B{band}")
+                    original_band_config.append(band)  # Already in the right format
+            
+            self.log_message(f"Current band config saved: {', '.join(original_band_config) if original_band_config else 'No bands'}", log_type="detailed")
             
             # Initialize results dictionaries with proper typing
             results_4g = {}
@@ -1893,7 +1989,7 @@ class BandOptimiserApp:
             
             # Test 4G bands
             self.log_message("🔄 Testing 4G bands...", log_type="both")
-            for band in SUPPORTED_4G_BANDS:
+            for band in self.available_bands["4G"]:
                 try:
                     # Apply single band
                     success = apply_band_lock(
@@ -1952,6 +2048,7 @@ class BandOptimiserApp:
                     final_score = signal_score if speed_score == 0 else (signal_score * 0.6 + speed_score * 0.4)
                     
                     # Store results
+                    # Extract band number from band string (e.g. "B3" -> 3)
                     band_num = int(band.replace("B", ""))
                     results_4g[band_num] = {
                         "score": final_score,
@@ -1985,7 +2082,7 @@ class BandOptimiserApp:
             
             # Test 5G bands if supported
             self.log_message("🔄 Testing 5G bands...", log_type="both")
-            for band in SUPPORTED_5G_BANDS:
+            for band in self.available_bands["5G"]:
                 try:
                     # Apply single band
                     success = apply_band_lock(
@@ -2882,6 +2979,369 @@ Licence: MIT"""
         # Update signal information with the new speed values
         self.signal_info["DOWNLOAD"].set(f"{download:.2f} Mbps")
         self.signal_info["UPLOAD"].set(f"{upload:.2f} Mbps")
+
+    def update_band_selection_ui(self):
+        """Update band selection UI based on available bands"""
+        # Clear existing band vars
+        self.band_vars.clear()
+        
+        # Create new band vars for available 4G bands
+        for band in self.available_bands["4G"]:
+            self.band_vars[band] = tk.BooleanVar(value=band in self.config.get("selected_bands", []))
+            
+        # Create new band vars for available 5G bands
+        for band in self.available_bands["5G"]:
+            self.band_vars[band] = tk.BooleanVar(value=band in self.config.get("selected_bands", []))
+        
+        # Log available bands for debugging
+        self.log_message(f"Updating band UI with 4G bands: {', '.join(self.available_bands['4G'])}", log_type="detailed")
+        self.log_message(f"Updating band UI with 5G bands: {', '.join(self.available_bands['5G'])}", log_type="detailed")
+        
+        # Custom band sorting function (sorts numerically instead of alphabetically)
+        def sort_bands(band_name):
+            # Extract the numeric part from the band name (e.g., "B1" -> 1, "n71" -> 71)
+            if band_name.startswith('B'):
+                return int(band_name[1:])
+            elif band_name.startswith('n'):
+                return int(band_name[1:])
+            else:
+                return 0  # Fallback for unknown formats
+        
+        # Check if we have the band section tabs
+        if hasattr(self, 'band_section_4g') and hasattr(self, 'band_section_5g'):
+            # Update 4G bands tab
+            # First, clear all existing widgets from the section
+            for child in self.band_section_4g.winfo_children():
+                child.destroy()
+            
+            # Create new checkboxes for available 4G bands
+            # Group into rows of 4
+            row = 0
+            col = 0
+            # Sort bands numerically instead of alphabetically
+            for band in sorted(self.available_bands["4G"], key=sort_bands):
+                checkbox = ttk.Checkbutton(self.band_section_4g, text=band, 
+                                          variable=self.band_vars[band])
+                checkbox.grid(row=row, column=col, sticky=tk.W, padx=2, pady=1)
+                col += 1
+                if col >= 4:
+                    col = 0
+                    row += 1
+            
+            # Add control buttons at the bottom
+            band_buttons_4g = ttk.Frame(self.band_section_4g)
+            band_buttons_4g.grid(row=row+1, column=0, columnspan=4, pady=5)
+            
+            ttk.Button(band_buttons_4g, text="Select All 4G", 
+                      command=lambda: self.toggle_all_bands(True, '4G'),
+                      width=12).pack(side=tk.LEFT, padx=2)
+                      
+            ttk.Button(band_buttons_4g, text="Clear All 4G", 
+                      command=lambda: self.toggle_all_bands(False, '4G'),
+                      width=12).pack(side=tk.LEFT, padx=2)
+            
+            # Update 5G bands tab
+            # First, clear all existing widgets from the section
+            for child in self.band_section_5g.winfo_children():
+                child.destroy()
+            
+            # Create new checkboxes for available 5G bands
+            # Group into rows of 4
+            row = 0
+            col = 0
+            # Sort bands numerically instead of alphabetically
+            for band in sorted(self.available_bands["5G"], key=sort_bands):
+                checkbox = ttk.Checkbutton(self.band_section_5g, text=band, 
+                                          variable=self.band_vars[band])
+                checkbox.grid(row=row, column=col, sticky=tk.W, padx=2, pady=1)
+                col += 1
+                if col >= 4:
+                    col = 0
+                    row += 1
+            
+            # Add control buttons at the bottom
+            band_buttons_5g = ttk.Frame(self.band_section_5g)
+            band_buttons_5g.grid(row=row+1, column=0, columnspan=4, pady=5)
+            
+            ttk.Button(band_buttons_5g, text="Select All 5G", 
+                      command=lambda: self.toggle_all_bands(True, '5G'),
+                      width=12).pack(side=tk.LEFT, padx=2)
+                      
+            ttk.Button(band_buttons_5g, text="Clear All 5G", 
+                      command=lambda: self.toggle_all_bands(False, '5G'),
+                      width=12).pack(side=tk.LEFT, padx=2)
+            
+            self.log_message("Band selection updated with available bands", log_type="both")
+        else:
+            self.log_message("Could not find band selection UI - please restart the application", log_type="both")
+
+    def show_user_guide(self):
+        """Show the user guide dialog"""
+        # Create user guide dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("User Guide - Huawei Band Optimiser")
+        dialog.geometry("700x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Create a notebook for tabbed sections of the guide
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Getting Started tab
+        getting_started = ttk.Frame(notebook)
+        notebook.add(getting_started, text="Getting Started")
+        
+        ttk.Label(getting_started, text="Getting Started with Huawei Band Optimiser", 
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=10)
+        
+        start_text = ttk.Label(getting_started, wraplength=650, justify=tk.LEFT, text="""
+1. Connect to your router:
+   • Enter your router's IP address (typically 192.168.1.1 or 192.168.8.1)
+   • Enter your username and password (typically admin/admin)
+   • Click the Connect button
+   
+2. Once connected, the app will:
+   • Scan for available 4G and 5G bands
+   • Display your current signal information
+   • Show which bands you're currently connected to
+   
+3. The "Auto-connect at startup" option will automatically connect when you open the app
+4. The "Run Speedtest on Startup" option will run a speedtest immediately after connecting
+5. "Use Huawei LTE API library" enables advanced features (recommended)
+        """)
+        start_text.pack(padx=15, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Band Selection tab
+        band_selection = ttk.Frame(notebook)
+        notebook.add(band_selection, text="Band Selection")
+        
+        ttk.Label(band_selection, text="Understanding Band Selection", 
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=10)
+        
+        band_text = ttk.Label(band_selection, wraplength=650, justify=tk.LEFT, text="""
+The Band Selection section lets you control which frequency bands your router uses:
+
+• 4G Bands tab: Select which 4G/LTE bands to use
+• 5G Bands tab: Select which 5G bands to use (if your router supports 5G)
+
+Within each tab:
+• The checkboxes show which bands are currently in use (automatically updated)
+• You can manually select or deselect bands
+• "Select All" and "Clear All" buttons quickly change all bands
+• "Apply Selection" sends your chosen bands to the router
+
+Why change bands?
+• Different bands offer different coverage, speed, and building penetration
+• Lower bands (B8, B20, B28) provide better coverage and building penetration
+• Higher bands (B1, B3, B7) provide better speeds in good signal conditions
+• Finding the right combination can dramatically improve your connection
+        """)
+        band_text.pack(padx=15, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Optimization tab
+        optimization = ttk.Frame(notebook)
+        notebook.add(optimization, text="Optimization")
+        
+        ttk.Label(optimization, text="Band Optimization Features", 
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=10)
+        
+        opt_text = ttk.Label(optimization, wraplength=650, justify=tk.LEFT, text="""
+The app offers two optimization methods:
+
+1. Basic Optimization (Optimise Bands button):
+   • Tests each band individually for signal quality
+   • Ranks bands based on RSRP and SINR values
+   • Recommends the best bands to use
+   • Generates a report with the results
+   • Quick but less thorough
+
+2. Enhanced Optimization:
+   • Comprehensive testing of all available bands
+   • Tests both 4G and 5G bands (if available)
+   • Runs speed tests on the best bands
+   • Measures signal quality and actual throughput
+   • Creates a detailed report with recommendations
+   • Takes longer but provides better recommendations
+
+After optimization:
+• You can apply the recommended settings with one click
+• View the detailed report to understand the results
+• Save the configuration for future use
+        """)
+        opt_text.pack(padx=15, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Advanced Features tab
+        advanced = ttk.Frame(notebook)
+        notebook.add(advanced, text="Advanced Features")
+        
+        ttk.Label(advanced, text="Advanced Features & Troubleshooting", 
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=10)
+        
+        adv_text = ttk.Label(advanced, wraplength=650, justify=tk.LEFT, text="""
+Advanced Options:
+
+1. Network Aggregation:
+   • Allows separate control of upload and download bands
+   • Useful for fine-tuning your connection
+   • Apply with "Apply Network Configuration" button
+
+2. Network Mode:
+   • Quickly switch between network types (2G/3G/4G/5G)
+   • Useful for testing or forcing specific network modes
+   • Apply with the "Apply" button next to the dropdown
+
+Troubleshooting:
+
+• If you get connection errors, try disabling "Use Huawei LTE API library"
+• If speedtests fail, try running them manually later
+• If band selection doesn't work, try disconnecting and reconnecting
+• Check the detailed log tab for more information about errors
+• Make sure you have the required libraries installed:
+  - speedtest-cli (for speed testing)
+  - huawei-lte-api (for advanced features)
+
+For best results:
+• Place your router near a window or high location
+• Try different band combinations based on the optimization results
+• Run tests at different times of day to find optimal settings
+        """)
+        adv_text.pack(padx=15, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Add OK button at the bottom
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
+
+# Add a new function for scanning available bands - around line 700-800
+def scan_available_bands(session, ip, token):
+    """Scan for available bands using the router's API"""
+    available_bands = {
+        "4G": [],
+        "5G": []
+    }
+    
+    # Check if we're using huawei-lte-api client
+    if HUAWEI_API_AVAILABLE and isinstance(session, Client):
+        try:
+            # Get available bands from net_mode_list API
+            net_mode_list = session.net.net_mode_list()
+            
+            # Log the raw response for debugging
+            print(f"Net mode list response: {net_mode_list}")
+            
+            # Extract LTE bands - handle different response formats
+            if "LTEBandList" in net_mode_list:
+                lte_band_list = net_mode_list["LTEBandList"]
+                
+                # First, check if the data has LTEBand as a list
+                if isinstance(lte_band_list, dict) and "LTEBand" in lte_band_list:
+                    lte_bands = lte_band_list["LTEBand"]
+                    
+                    # Handle both list and single item cases
+                    if not isinstance(lte_bands, list):
+                        lte_bands = [lte_bands]
+                    
+                    # Process each LTEBand entry
+                    for band_entry in lte_bands:
+                        if isinstance(band_entry, dict) and "Name" in band_entry:
+                            # Parse the name which contains band information
+                            band_name = band_entry["Name"]
+                            
+                            # Look for patterns like "LTE BC1", "LTE BC3", etc.
+                            if "LTE BC" in band_name:
+                                for part in band_name.split("/"):
+                                    if "LTE BC" in part:
+                                        try:
+                                            # Extract the band number from "LTE BCx"
+                                            band_num = int(part.strip().replace("LTE BC", ""))
+                                            available_bands["4G"].append(f"B{band_num}")
+                                        except ValueError:
+                                            # Skip if the band number isn't a valid integer
+                                            pass
+                
+                # Also try the original approach if the new one didn't work
+                if not available_bands["4G"] and isinstance(lte_band_list, str):
+                    # Try to interpret as hex
+                    try:
+                        band_hex = int(lte_band_list, 16)
+                        for band_num, band_mask in BAND_MAP.items():
+                            if band_hex & band_mask:
+                                available_bands["4G"].append(f"B{band_num}")
+                    except ValueError:
+                        # If not hex, try comma-separated format
+                        if "," in lte_band_list:
+                            for band in lte_band_list.split(","):
+                                band = band.strip()
+                                if band.startswith("B"):
+                                    available_bands["4G"].append(band)
+                                elif band.isdigit():
+                                    available_bands["4G"].append(f"B{band}")
+            
+            # Extract 5G bands if available - similar nested structure handling
+            if "NRBandList" in net_mode_list:
+                nr_band_list = net_mode_list["NRBandList"]
+                
+                # Check if the data has NRBand as a list
+                if isinstance(nr_band_list, dict) and "NRBand" in nr_band_list:
+                    nr_bands = nr_band_list["NRBand"]
+                    
+                    # Handle both list and single item cases
+                    if not isinstance(nr_bands, list):
+                        nr_bands = [nr_bands]
+                    
+                    # Process each NRBand entry
+                    for band_entry in nr_bands:
+                        if isinstance(band_entry, dict) and "Name" in band_entry:
+                            # Parse the name which contains band information
+                            band_name = band_entry["Name"]
+                            
+                            # Look for patterns like "NR n1", "NR n78", etc.
+                            if "NR n" in band_name:
+                                for part in band_name.split("/"):
+                                    if "NR n" in part:
+                                        try:
+                                            # Extract the band number from "NR nx"
+                                            band_num = int(part.strip().replace("NR n", ""))
+                                            available_bands["5G"].append(f"n{band_num}")
+                                        except ValueError:
+                                            # Skip if the band number isn't a valid integer
+                                            pass
+                
+                # Try the original approach if the new one didn't work
+                if not available_bands["5G"] and isinstance(nr_band_list, str):
+                    try:
+                        band_hex = int(nr_band_list, 16)
+                        # 5G band mapping would be needed here
+                        for band_num in [1, 3, 28, 41, 78, 79]:
+                            available_bands["5G"].append(f"n{band_num}")
+                    except ValueError:
+                        if "," in nr_band_list:
+                            for band in nr_band_list.split(","):
+                                band = band.strip()
+                                if band.startswith("n"):
+                                    available_bands["5G"].append(band)
+                                elif band.isdigit():
+                                    available_bands["5G"].append(f"n{band}")
+            
+            # If no bands were detected, fall back to supported bands
+            if not available_bands["4G"]:
+                available_bands["4G"] = SUPPORTED_4G_BANDS
+            if not available_bands["5G"]:
+                available_bands["5G"] = SUPPORTED_5G_BANDS
+                
+            return available_bands
+        except Exception as e:
+            print(f"Error scanning bands via API: {str(e)}")
+            # Fall back to default bands
+            return {
+                "4G": SUPPORTED_4G_BANDS,
+                "5G": SUPPORTED_5G_BANDS
+            }
+    
+    # Fall back to default bands
+    return {
+        "4G": SUPPORTED_4G_BANDS,
+        "5G": SUPPORTED_5G_BANDS
+    }
 
 # Run GUI
 if __name__ == "__main__":
