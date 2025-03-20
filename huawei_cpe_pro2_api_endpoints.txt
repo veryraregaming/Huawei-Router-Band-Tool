@@ -1,0 +1,21 @@
+# Huawei CPE Pro 2 API Endpoints Used by huawei-lte-api Library
+
+## Network and Band Management 
+api/net/net-mode                 # Get/set network mode and LTE bands
+api/net/net-mode-list            # List available network modes and bands
+
+## Device Information
+api/device/information           # Basic device information  
+api/device/signal                # Signal strength and quality metrics
+
+## Monitoring
+api/monitoring/status            # Connection status
+api/monitoring/traffic-statistics # Data usage statistics
+
+## Connection & Network
+api/net/current-plmn             # Current network/carrier information
+api/dialup/connection            # Connection control
+
+## Authentication
+api/webserver/SesTokInfo         # Session token for API access
+api/user/login                   # User login endpoint 
