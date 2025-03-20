@@ -1,6 +1,6 @@
-# Huawei Band Optimiser
+# Huawei Router Band Tool
 
-A powerful tool for Huawei CPE Pro 2 routers that optimises band selection to maximise signal quality and internet speeds.
+A powerful tool for optimising band selection to maximise signal quality and internet speeds on Huawei CPE Pro 2 routers.
 
 ## Features
 
@@ -8,7 +8,7 @@ A powerful tool for Huawei CPE Pro 2 routers that optimises band selection to ma
 - **Enhanced Optimisation:** Combines signal quality metrics with speed tests for the most accurate recommendations
 - **Speed Testing:** Built-in speed testing using the speedtest.net API
 - **Signal Monitoring:** Real-time monitoring of signal metrics including RSRP, SINR, RSRQ
-- **User-friendly Interface:** Clean, intuitive Tkinter interface with detailed and standard logging views
+- **User-friendly Interface:** Clean, intuitive interface with detailed logging views
 - **Band Configuration:** Manually select bands or use the optimisation recommendations
 - **Reporting:** Generates detailed optimisation reports for future reference
 
@@ -17,8 +17,8 @@ A powerful tool for Huawei CPE Pro 2 routers that optimises band selection to ma
 1. Make sure you have Python 3.7+ installed
 2. Clone this repository:
    ```
-   git clone https://github.com/yourusername/huawei-band-optimizer.git
-   cd huawei-band-optimizer
+   git clone https://github.com/yourusername/huawei-band-optimiser.git
+   cd huawei-band-optimiser
    ```
 3. Install the required dependencies:
    ```
@@ -60,22 +60,17 @@ The application saves your preferences in a `config.json` file, including:
 - Router IP address
 - Login credentials
 - Auto-connect setting
-- Speedtest on startup preference
+- Speed test on startup preference
 
 ## Troubleshooting
 
 - **API Restrictions:** Some carrier-locked routers may have API restrictions that limit functionality
 - **Connection Issues:** Ensure your router is reachable at the specified IP
-- **Speedtest Failures:** Check your internet connection or try again later
+- **Speed Test Failures:** Check your internet connection or try again later
 
 ## Licence
 
 [MIT Licence](LICENCE)
-
-## Acknowledgements
-
-- [speedtest-cli](https://github.com/sivel/speedtest-cli) for speed testing functionality
-- [huawei-lte-api](https://github.com/Salamek/huawei-lte-api) for advanced Huawei router API access 
 
 ## Support the Project
 
@@ -85,8 +80,13 @@ If you find this tool helpful and would like to support its development, you can
 
 Your support helps:
 - Maintain and improve the application
-- Add new features and optimizations
+- Add new features and optimisations
 - Keep the project up to date with router firmware changes
 - Provide better documentation and support
 
-Thank you for your support! 💖 
+Thank you for your support! 💖
+
+## Acknowledgements
+
+- [speedtest-cli](https://github.com/sivel/speedtest-cli) for speed testing functionality
+- [huawei-lte-api](https://github.com/Salamek/huawei-lte-api) for advanced Huawei router API access 

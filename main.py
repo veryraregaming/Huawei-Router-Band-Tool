@@ -769,160 +769,110 @@ def get_connection_status(session, ip, token):
 
 # Apply Band Lock
 def apply_band_lock(session, ip, token, selected_bands):
+    """Apply band lock configuration"""
+    if not selected_bands:
+        raise ValueError("No bands selected for locking")
+        
     # Check if we're using huawei-lte-api client
-    if HUAWEI_API_AVAILABLE and isinstance(session, Client):
+    if isinstance(session, Client):
         try:
-            # Ensure selected_bands are all strings
-            selected_bands = [str(band) if not isinstance(band, str) else band for band in selected_bands]
-            
-            # Get current network mode to understand parameters
-            current_net_mode = session.net.net_mode()
-            print(f"Current network mode: {current_net_mode}")
-            
-            # Convert selected bands to LTE band hex format
+            # Convert band list to API format
+            band_str = ','.join(str(b) for b in selected_bands)
+            response = session.net.net_mode(
+                LTEBand=band_str,
+                NetworkBand=None,
+                NetworkMode=None
+            )
+            if response and isinstance(response, dict):
+                if 'result' in response and response['result'] == 'success':
+                    return True
+                elif 'error' in response:
+                    error_code = response.get('error', {}).get('code', 'Unknown')
+                    error_msg = response.get('error', {}).get('message', 'Unknown')
+                    if error_code == '112003':  # Unsupported band error
+                        raise Exception(f"Band not supported by device: {band_str}")
+                    raise Exception(f"API band lock error: {error_code}: {error_msg}")
+            return False
+        except Exception as e:
+            if '112003' in str(e):  # Unsupported band error
+                raise Exception(f"Band not supported by this device")
+            raise Exception(f"Failed to apply band lock: {str(e)}")
+    else:
+        # Web interface fallback implementation
+        try:
+            # Convert band list to hex format
             band_numbers = [int(band[1:]) for band in selected_bands if isinstance(band, str) and band.startswith("B")]
-            band_hex = sum(BAND_MAP.get(num, 0) for num in band_numbers) or 0x3FFFFFFF  # Default to all bands if none selected
+            band_hex = sum(BAND_MAP.get(num, 0) for num in band_numbers) or 0x3FFFFFFF
             band_hex_str = format(band_hex, 'X')
             
-            # Get current NetworkBand value to preserve it
-            network_band = current_net_mode.get('NetworkBand', '0')
+            # Get CSRF token
+            response = session.get(f"http://{ip}{TOKEN_ENDPOINT}", timeout=10)
+            if response.status_code != 200:
+                raise Exception("Failed to get CSRF token")
+            token = ET.fromstring(response.text).find("TokInfo").text
             
-            # Get current NetworkMode value to preserve it (unless we want to change it)
-            network_mode = "03"  # LTE preferred mode
+            # Prepare and send band lock request
+            payload = f"""
+            <request>
+                <NetworkMode>03</NetworkMode>
+                <LTEBand>{band_hex_str}</LTEBand>
+            </request>
+            """
+            headers = {
+                "Content-Type": "application/xml",
+                "__RequestVerificationToken": token,
+                "User-Agent": "Mozilla/5.0",
+                "Referer": f"http://{ip}/html/home.html"
+            }
             
-            print(f"Setting band lock with: LTEBand={band_hex_str}, NetworkBand={network_band}, NetworkMode={network_mode}")
-            
-            # Call set_net_mode with positional arguments in the correct order:
-            # LTEBand, NetworkBand, NetworkMode
-            # Ensure all values are strings and not in a sequence/list
-            result = session.net.set_net_mode(str(band_hex_str), str(network_band), str(network_mode))
-            
-            print(f"API call result: {result}")
-            return True, f"API band lock applied: {', '.join(selected_bands) or 'All bands'}"
+            response = session.post(f"http://{ip}{BAND_LOCK_ENDPOINT}", data=payload, headers=headers, timeout=15)
+            if response.status_code != 200:
+                raise Exception(f"Band lock failed with status code: {response.status_code}")
+            return True
         except Exception as e:
-            print(f"API band lock error details: {str(e)}")
-            return False, f"API band lock error: {str(e)}"
-    
-    # Legacy implementation using requests session
-    # Ensure selected_bands are all strings
-    selected_bands = [str(band) if not isinstance(band, str) else band for band in selected_bands]
-    
-    band_numbers = [int(band[1:]) for band in selected_bands if isinstance(band, str) and band.startswith("B")]
-    band_hex = sum(BAND_MAP.get(num, 0) for num in band_numbers) or 0x3FFFFFFF
-    band_hex_str = format(band_hex, 'X')
-    
-    try:
-        response = session.get(f"http://{ip}{TOKEN_ENDPOINT}", timeout=10)
-        if response.status_code != 200:
-            return False, "Failed to get CSRF token"
-        token = ET.fromstring(response.text).find("TokInfo").text
-        
-        payload = f"""
-        <request>
-            <NetworkMode>03</NetworkMode>
-            <LTEBand>{band_hex_str}</LTEBand>
-        </request>
-        """
-        headers = {
-            "Content-Type": "application/xml",
-            "__RequestVerificationToken": token,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Referer": f"http://{ip}/html/home.html"
-        }
-        
-        response = session.post(f"http://{ip}{BAND_LOCK_ENDPOINT}", data=payload, headers=headers, timeout=15)
-        return response.status_code == 200, f"Status code: {response.status_code}"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
+            raise Exception(f"Web interface band lock failed: {str(e)}")
 
 # Speed test function
 def run_speedtest(server_id=None):
-    """Run a speedtest using speedtest.net API
-    
-    Args:
-        server_id: Optional server ID to use for testing (to match website tests)
-    
-    Returns:
-        Dictionary with test results
-    """
-    if not SPEEDTEST_AVAILABLE:
-        return {
-            "success": False,
-            "message": "Speedtest-cli package not available. Install with 'pip install speedtest-cli'"
-        }
-    
+    """Run a speedtest and return the results"""
     try:
-        st = speedtest.Speedtest()
+        # Configure speedtest
+        s = speedtest.Speedtest()
+        s.get_best_server()
         
-        # Use a larger buffer size for more consistent results
-        st.download_actual = True
-        st.upload_actual = True
+        # Run tests
+        s.download()
+        s.upload()
         
-        # Ensure threads are set to match website behavior (higher is better for modern connections)
-        st.threads = 8  
-        
-        # Get list of servers
-        st.get_servers()
-        
-        # Use specific server if requested, otherwise get best server
-        if server_id:
-            st.get_servers([server_id])
-        else:
-            st.get_best_server()
-            
-        server = st.results.server
-        print(f"Selected server: {server['name']} ({server['host']})")
-        
-        # Warm up the connection with a small test
-        # This helps establish a better connection before the actual test
-        print("Warming up connection...")
-        _ = st.download(threads=1, callback=lambda x, y, **kwargs: None)
-        _ = st.upload(threads=1, pre_allocate=True, callback=lambda x, y, **kwargs: None)
-        
-        # Run download test with multiple threads
-        print("Running download test...")
-        download_speed = st.download(threads=st.threads, callback=lambda x, y, **kwargs: None) / 1_000_000  # Convert to Mbps
-        
-        # Run upload test with pre-allocation and multiple threads
-        # Upload speeds can be more variable than download speeds
-        # Multiple tests help get a more accurate result
-        print("Running upload test (multiple attempts for accuracy)...")
-        upload_config = {
-            'threads': st.threads,
-            'pre_allocate': True,
-            'callback': lambda x, y, **kwargs: None,
-        }
-        
-        # Run multiple upload tests and take the best result
-        # Upload tests are often less consistent than download tests
-        upload_attempts = []
-        for i in range(3):
-            print(f"Upload attempt {i+1}...")
-            upload_speed = st.upload(**upload_config) / 1_000_000
-            upload_attempts.append(upload_speed)
-            time.sleep(1)  # Brief pause between attempts
-            
-        # Take the best result
-        upload_speed = max(upload_attempts)
-        
-        # Get ping
-        ping = st.results.ping
-        
+        # Get results
+        results = s.results.dict()
         return {
-            "success": True,
-            "download": download_speed,
-            "upload": upload_speed,
-            "ping": ping,
-            "server": server["name"],
-            "server_id": server["id"],
-            "server_host": server["host"],
-            "upload_attempts": upload_attempts
+            'download': results['download'] / 1_000_000,  # Convert to Mbps
+            'upload': results['upload'] / 1_000_000,
+            'ping': results['ping']
         }
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Speed test failed: {str(e)}"
-        }
+        if "Malformed speedtest.net configuration" in str(e):
+            # Retry once with a different server if configuration error
+            try:
+                s = speedtest.Speedtest()
+                servers = s.get_servers()
+                if servers:
+                    # Try the second best server
+                    server_list = list(servers.values())[0]
+                    if len(server_list) > 1:
+                        s.get_best_server(server_list[1:])
+                    s.download()
+                    s.upload()
+                    results = s.results.dict()
+                    return {
+                        'download': results['download'] / 1_000_000,
+                        'upload': results['upload'] / 1_000_000,
+                        'ping': results['ping']
+                    }
+            except Exception as retry_error:
+                raise Exception(f"Speed test failed after retry: {str(retry_error)}")
+        raise Exception(f"Speed test failed: {str(e)}")
 
 # Create reports directory if not exists
 def ensure_reports_dir():
@@ -1899,312 +1849,63 @@ class BandOptimiserApp:
         threading.Thread(target=self.enhanced_optimise_thread, daemon=True).start()
     
     def enhanced_optimise_thread(self):
+        """Enhanced optimisation thread implementation"""
         try:
-            # Define bands to test by type
-            bands_4g = [1, 3, 7, 8, 20, 28, 32]  # 4G bands
-            bands_5g = [38, 40, 41, 42]  # 5G bands
-            results_4g = []
-            results_5g = []
+            # Store original band configuration
+            original_bands = self.current_bands.copy() if hasattr(self, 'current_bands') else []
+            
+            # Initialize results dictionaries with proper typing
+            results_4g = {}
+            results_5g = {}
             
             # Test 4G bands
-            self.root.after(0, lambda: self.log_message("🔄 Testing 4G bands...", log_type="both"))
-            for band in bands_4g:
-                self.root.after(0, lambda b=band: self.log_message(f"Testing 4G band B{b}...", log_type="standard"))
-                
-                # Apply single band
-                success, msg = apply_band_lock(
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token,
-                    [f"B{band}"]
-                )
-                
-                if not success:
-                    self.root.after(0, lambda m=msg: self.log_message(f"Failed to apply band: {m}", log_type="both"))
-                    continue
-                
-                # Wait for the band to connect
-                time.sleep(10)  # Longer wait for more stability
-                
-                # Get signal metrics
-                signal_data = fetch_signal_data(
-                    self,
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token
-                )
-                
-                if not signal_data:
-                    self.root.after(0, lambda b=band: self.log_message(f"No signal data for B{b}, skipping", log_type="both"))
-                    continue
-                
-                # Extract metrics for scoring
-                rsrp_raw = signal_data.get("RSRP", "--") or "--"
-                sinr_raw = signal_data.get("SINR", "--") or "--"
-                network_type = signal_data.get("NETWORK_TYPE", "4G") or "4G"
-                
-                # Convert values safely
+            self.log_message("🔄 Testing 4G bands...", log_type="both")
+            for band in SUPPORTED_4G_BANDS:
                 try:
-                    rsrp = rsrp_raw.replace("dBm", "") if isinstance(rsrp_raw, str) else "--"
-                    rsrp_val = float(rsrp) if rsrp != "--" else -120
-                except (ValueError, TypeError, AttributeError):
-                    rsrp = "--"
-                    rsrp_val = -120
-                    
-                try:
-                    sinr = sinr_raw.replace("dB", "") if isinstance(sinr_raw, str) else "--"
-                    sinr_val = float(sinr) if sinr != "--" else 0
-                except (ValueError, TypeError, AttributeError):
-                    sinr = "--"
-                    sinr_val = 0
-                
-                # Run speed test for this band
-                self.root.after(0, lambda b=band: self.log_message(f"Running speedtest for B{b}..."))
-                
-                # Get theoretical max speeds for this band
-                try:
-                    theoretical_dl, theoretical_ul = estimate_max_speed(f"B{band}", network_type, rsrp, sinr)
+                    results = self.test_single_band(band, "4G")
+                    if results:  # Only store valid results
+                        results_4g[int(band.replace('B', ''))] = results
                 except Exception as e:
-                    self.root.after(0, lambda err=str(e): self.log_message(f"Error estimating theoretical speeds: {err}"))
-                    theoretical_dl, theoretical_ul = 0, 0
-                
-                # Run speed test
-                speedtest_result = run_speedtest()
-                
-                # Normalize signal metrics
-                rsrp_norm = min(100, max(0, (abs(rsrp_val) - 50) * (100 / 70)))
-                sinr_norm = min(100, max(0, (30 - sinr_val) * (100 / 30)))
-                signal_score = (rsrp_norm * 0.7) + (sinr_norm * 0.3)
-                
-                result = {
-                    "band": band,
-                    "rsrp": rsrp,
-                    "sinr": sinr,
-                    "network_type": network_type,
-                    "signal_score": signal_score,
-                    "theoretical_dl_mbps": theoretical_dl,
-                    "theoretical_ul_mbps": theoretical_ul
-                }
-                
-                # Add speed test results if successful
-                if speedtest_result["success"]:
-                    dl = speedtest_result["download"]
-                    ul = speedtest_result["upload"]
-                    ping = speedtest_result["ping"]
-                    
-                    result.update({
-                        "download_mbps": dl,
-                        "upload_mbps": ul,
-                        "ping_ms": ping
-                    })
-                    
-                    # Normalize speed metrics
-                    dl_norm = min(100, max(0, (1 - (dl / 500)) * 100)) if dl > 0 else 100
-                    ping_norm = min(100, max(0, (ping / 200) * 100)) if ping > 0 else 100
-                    speed_score = (dl_norm * 0.8) + (ping_norm * 0.2)
-                    
-                    result["speed_score"] = speed_score
-                    result["score"] = (signal_score * 0.7) + (speed_score * 0.3)
-                    
-                    if theoretical_dl > 0:
-                        result["dl_efficiency"] = (dl / theoretical_dl) * 100
-                    if theoretical_ul > 0:
-                        result["ul_efficiency"] = (ul / theoretical_ul) * 100
-                    
-                    self.root.after(0, lambda b=band, d=dl, u=ul, p=ping: 
-                        self.log_message(f"Band B{b}: DL {d:.2f} Mbps, UL {u:.2f} Mbps, Ping {p:.2f} ms"))
-                else:
-                    result["score"] = signal_score
-                    self.root.after(0, lambda b=band, err=speedtest_result["message"]: 
-                        self.log_message(f"Speedtest failed for B{b}: {err}"))
-                
-                results_4g.append(result)
-                time.sleep(5)
+                    self.log_message(f"Error testing band {band}: {str(e)}", log_type="both")
+                    continue
             
             # Test 5G bands
-            self.root.after(0, lambda: self.log_message("🔄 Testing 5G bands...", log_type="both"))
-            for band in bands_5g:
-                # Same testing logic as 4G but store in results_5g
-                # ... (same code as above, just store in results_5g)
-                self.root.after(0, lambda b=band: self.log_message(f"Testing 5G band B{b}...", log_type="standard"))
-                
-                # Apply single band
-                success, msg = apply_band_lock(
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token,
-                    [f"B{band}"]
-                )
-                
-                if not success:
-                    self.root.after(0, lambda m=msg: self.log_message(f"Failed to apply band: {m}", log_type="both"))
-                    continue
-                
-                # Wait for the band to connect
-                time.sleep(10)
-                
-                signal_data = fetch_signal_data(
-                    self,
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token
-                )
-                
-                if not signal_data:
-                    self.root.after(0, lambda b=band: self.log_message(f"No signal data for B{b}, skipping", log_type="both"))
-                    continue
-                
-                # Extract and process metrics (same as 4G)
-                rsrp_raw = signal_data.get("RSRP", "--") or "--"
-                sinr_raw = signal_data.get("SINR", "--") or "--"
-                network_type = signal_data.get("NETWORK_TYPE", "5G") or "5G"
-                
+            self.log_message("🔄 Testing 5G bands...", log_type="both")
+            for band in SUPPORTED_5G_BANDS:
                 try:
-                    rsrp = rsrp_raw.replace("dBm", "") if isinstance(rsrp_raw, str) else "--"
-                    rsrp_val = float(rsrp) if rsrp != "--" else -120
-                except (ValueError, TypeError, AttributeError):
-                    rsrp = "--"
-                    rsrp_val = -120
-                    
-                try:
-                    sinr = sinr_raw.replace("dB", "") if isinstance(sinr_raw, str) else "--"
-                    sinr_val = float(sinr) if sinr != "--" else 0
-                except (ValueError, TypeError, AttributeError):
-                    sinr = "--"
-                    sinr_val = 0
-                
-                self.root.after(0, lambda b=band: self.log_message(f"Running speedtest for B{b}..."))
-                
-                try:
-                    theoretical_dl, theoretical_ul = estimate_max_speed(f"B{band}", network_type, rsrp, sinr)
+                    results = self.test_single_band(band, "5G")
+                    if results:  # Only store valid results
+                        results_5g[int(band.replace('B', ''))] = results
                 except Exception as e:
-                    self.root.after(0, lambda err=str(e): self.log_message(f"Error estimating theoretical speeds: {err}"))
-                    theoretical_dl, theoretical_ul = 0, 0
-                
-                speedtest_result = run_speedtest()
-                
-                rsrp_norm = min(100, max(0, (abs(rsrp_val) - 50) * (100 / 70)))
-                sinr_norm = min(100, max(0, (30 - sinr_val) * (100 / 30)))
-                signal_score = (rsrp_norm * 0.7) + (sinr_norm * 0.3)
-                
-                result = {
-                    "band": band,
-                    "rsrp": rsrp,
-                    "sinr": sinr,
-                    "network_type": network_type,
-                    "signal_score": signal_score,
-                    "theoretical_dl_mbps": theoretical_dl,
-                    "theoretical_ul_mbps": theoretical_ul
-                }
-                
-                if speedtest_result["success"]:
-                    dl = speedtest_result["download"]
-                    ul = speedtest_result["upload"]
-                    ping = speedtest_result["ping"]
-                    
-                    result.update({
-                        "download_mbps": dl,
-                        "upload_mbps": ul,
-                        "ping_ms": ping
-                    })
-                    
-                    dl_norm = min(100, max(0, (1 - (dl / 500)) * 100)) if dl > 0 else 100
-                    ping_norm = min(100, max(0, (ping / 200) * 100)) if ping > 0 else 100
-                    speed_score = (dl_norm * 0.8) + (ping_norm * 0.2)
-                    
-                    result["speed_score"] = speed_score
-                    result["score"] = (signal_score * 0.7) + (speed_score * 0.3)
-                    
-                    if theoretical_dl > 0:
-                        result["dl_efficiency"] = (dl / theoretical_dl) * 100
-                    if theoretical_ul > 0:
-                        result["ul_efficiency"] = (ul / theoretical_ul) * 100
-                    
-                    self.root.after(0, lambda b=band, d=dl, u=ul, p=ping: 
-                        self.log_message(f"Band B{b}: DL {d:.2f} Mbps, UL {u:.2f} Mbps, Ping {p:.2f} ms"))
-                else:
-                    result["score"] = signal_score
-                    self.root.after(0, lambda b=band, err=speedtest_result["message"]: 
-                        self.log_message(f"Speedtest failed for B{b}: {err}"))
-                
-                results_5g.append(result)
-                time.sleep(5)
+                    if "112003" in str(e):
+                        self.log_message(f"Band {band} not supported by this device", log_type="both")
+                    else:
+                        self.log_message(f"Error testing band {band}: {str(e)}", log_type="both")
+                    continue
+
+            # Process results and find optimal combinations
+            recommended_results = self.process_enhanced_results(results_4g, results_5g)
             
-            # Sort results by score
-            results_4g.sort(key=lambda x: x.get("score", float('inf')))
-            results_5g.sort(key=lambda x: x.get("score", float('inf')))
-            
-            # Get top bands for each type
-            top_4g_bands = [f"B{r['band']}" for r in results_4g[:2]] if results_4g else []
-            top_5g_bands = [f"B{r['band']}" for r in results_5g[:1]] if results_5g else []
-            
-            # Test recommended combinations
-            recommended_results = {}
-            
-            if top_4g_bands:
-                self.root.after(0, lambda: self.log_message("🔄 Testing recommended 4G combination...", log_type="both"))
-                success, msg = apply_band_lock(
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token,
-                    top_4g_bands
-                )
-                
-                if success:
-                    time.sleep(10)  # Wait for bands to stabilize
-                    speedtest_result = run_speedtest()
-                    if speedtest_result["success"]:
-                        recommended_results["4G"] = {
-                            "bands": top_4g_bands,
-                            "download": speedtest_result["download"],
-                            "upload": speedtest_result["upload"],
-                            "ping": speedtest_result["ping"]
-                        }
-            
-            if top_5g_bands:
-                self.root.after(0, lambda: self.log_message("🔄 Testing recommended 5G combination...", log_type="both"))
-                success, msg = apply_band_lock(
-                    self.session or self.client,
-                    self.router_ip.get(),
-                    self.token,
-                    top_5g_bands
-                )
-                
-                if success:
-                    time.sleep(10)  # Wait for bands to stabilize
-                    speedtest_result = run_speedtest()
-                    if speedtest_result["success"]:
-                        recommended_results["5G"] = {
-                            "bands": top_5g_bands,
-                            "download": speedtest_result["download"],
-                            "upload": speedtest_result["upload"],
-                            "ping": speedtest_result["ping"]
-                        }
-            
-            # Generate report with all results
+            # Generate report
             report_path = generate_report({
-                "4G": results_4g,
-                "5G": results_5g,
-                "recommended": recommended_results
-            }, "enhanced")
+                '4G_results': results_4g,
+                '5G_results': results_5g,
+                'recommended': recommended_results
+            }, optimisation_type="enhanced")
             
-            self.root.after(0, lambda p=report_path: self.log_message(f"Report generated: {p}", log_type="both"))
+            # Show results summary
+            self.root.after(0, lambda: self.show_enhanced_optimisation_summary(
+                results_4g, results_5g, recommended_results, report_path
+            ))
             
-            # Show summary with both 4G and 5G results
-            if results_4g or results_5g:
-                self.root.after(0, lambda: self.show_enhanced_optimisation_summary(
-                    results_4g=results_4g,
-                    results_5g=results_5g,
-                    recommended_results=recommended_results,
-                    report_path=report_path
-                ))
-            else:
-                self.root.after(0, lambda: self.log_message("⚠️ No valid bands found for optimisation", log_type="both"))
-                
         except Exception as e:
-            self.root.after(0, lambda err=str(e): self.log_message(f"Enhanced optimisation error: {err}"))
-        
-        self.root.after(3000, self.refresh_signal)
+            self.log_message(f"Enhanced optimisation error: {str(e)}", log_type="both")
+            # Attempt to restore original bands
+            try:
+                if original_bands:
+                    self.apply_band_selection(original_bands)
+            except Exception as restore_error:
+                self.log_message(f"Failed to restore original bands: {str(restore_error)}", log_type="both")
     
     def show_enhanced_optimisation_summary(self, results_4g, results_5g, recommended_results, report_path):
         """Show enhanced optimisation summary with separate 4G and 5G results"""
@@ -2504,13 +2205,13 @@ class BandOptimiserApp:
     
     def show_about(self):
         """Show about dialog"""
-        about_text = """Huawei-Router-Band-Tool
+        about_text = """Huawei Router Band Tool
 
 A tool for optimising band selection on Huawei CPE Pro 2 routers.
 
-Version: 1.0.0
+Version: 1.0.1
 Author: Rare
-License: MIT"""
+Licence: MIT"""
         
         messagebox.showinfo("About", about_text)
 
