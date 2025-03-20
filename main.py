@@ -11,7 +11,7 @@ import platform
 import base64
 import hashlib
 import os
-import datetime
+from datetime import datetime
 import inspect
 import webbrowser
 
@@ -776,21 +776,31 @@ def apply_band_lock(session, ip, token, selected_bands):
     # Check if we're using huawei-lte-api client
     if isinstance(session, Client):
         try:
-            # Convert band list to API format
-            band_str = ','.join(str(b) for b in selected_bands)
-            response = session.net.net_mode(
-                LTEBand=band_str,
-                NetworkBand=None,
-                NetworkMode=None
+            # Convert selected bands to LTE band hex format
+            band_numbers = [int(band[1:]) for band in selected_bands if isinstance(band, str) and band.startswith("B")]
+            band_hex = sum(BAND_MAP.get(num, 0) for num in band_numbers) or 0x3FFFFFFF  # Default to all bands if none selected
+            band_hex_str = format(band_hex, 'X')
+            
+            # Get current settings
+            current_mode = session.net.net_mode()
+            
+            # Set the new mode using the correct parameter names
+            response = session.net.set_net_mode(
+                lteband=band_hex_str,
+                networkband=current_mode.get('NetworkBand', '3FFFFFFF'),
+                networkmode=current_mode.get('NetworkMode', '03')
             )
-            if response and isinstance(response, dict):
+            
+            if response == 'OK':
+                return True
+            elif isinstance(response, dict):
                 if 'result' in response and response['result'] == 'success':
                     return True
                 elif 'error' in response:
                     error_code = response.get('error', {}).get('code', 'Unknown')
                     error_msg = response.get('error', {}).get('message', 'Unknown')
                     if error_code == '112003':  # Unsupported band error
-                        raise Exception(f"Band not supported by device: {band_str}")
+                        raise Exception(f"Band not supported by device")
                     raise Exception(f"API band lock error: {error_code}: {error_msg}")
             return False
         except Exception as e:
@@ -883,23 +893,23 @@ def ensure_reports_dir():
 
 # Generate a report file with date and time
 def generate_report(results, optimisation_type="basic"):
+    """Generate a report file with date and time"""
     ensure_reports_dir()
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     report_path = os.path.join("reports", f"optimisation_report_{timestamp}.txt")
     
     with open(report_path, "w") as f:
         f.write(f"Band Optimisation Report\n")
-        f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Optimisation Type: {optimisation_type}\n\n")
         
-        # Sort results by score (lower is better)
-        sorted_results = sorted(results, key=lambda x: x['score'])
+        # Sort results by score (higher is better)
+        sorted_results = sorted(results.items(), key=lambda x: x[1]['score'], reverse=True)
         
         f.write("Individual Band Results:\n")
         f.write("------------------------\n")
         
-        for result in results:
-            band = result['band']
+        for band, result in sorted_results:
             rsrp = result.get('rsrp', 'Unknown')
             sinr = result.get('sinr', 'Unknown')
             # Include network type (4G/5G)
@@ -922,8 +932,8 @@ def generate_report(results, optimisation_type="basic"):
                 f.write(f"  Measured Download: {result['download_mbps']:.2f} Mbps\n")
                 f.write(f"  Measured Upload: {result['upload_mbps']:.2f} Mbps\n")
                 
-                if 'ping_ms' in result:
-                    f.write(f"  Ping: {result['ping_ms']:.3f} ms\n")
+            if 'ping_ms' in result:
+                f.write(f"  Ping: {result['ping_ms']:.3f} ms\n")
                 
                 if 'dl_efficiency' in result:
                     f.write(f"  Download Efficiency: {result['dl_efficiency']:.1f}%\n")
@@ -949,10 +959,10 @@ def generate_report(results, optimisation_type="basic"):
         
         if best_bands:
             best_band = best_bands[0]
-            best_band_str = f"B{best_band['band']}"
-            f.write(f"Best band: {best_band_str} (Score: {best_band['score']})\n")
+            best_band_str = f"B{best_band[0]}"
+            f.write(f"Best band: {best_band_str} (Score: {best_band[1]['score']})\n")
             
-            recommended_bands = ", ".join([f"B{b['band']}" for b in best_bands])
+            recommended_bands = ", ".join([f"B{b[0]}" for b in best_bands])
             f.write(f"Recommended combination: {recommended_bands}\n\n")
             
             # Add explanation of why bands are recommended even if speedtest failed
@@ -966,16 +976,16 @@ def generate_report(results, optimisation_type="basic"):
             
             # List which bands have efficiency data
             has_efficiency = []
-            for result in sorted_results:
+            for band, result in sorted_results:
                 if 'dl_efficiency' in result or 'ul_efficiency' in result:
-                    has_efficiency.append(result)
+                    has_efficiency.append((band, result))
             
             if has_efficiency:
                 f.write("Efficiency Summary:\n")
                 f.write("------------------\n")
                 
-                for result in has_efficiency:
-                    band_str = f"B{result['band']}"
+                for band, result in has_efficiency:
+                    band_str = f"B{band}"
                     dl_eff = result.get('dl_efficiency', 'N/A')
                     ul_eff = result.get('ul_efficiency', 'N/A')
                     
@@ -1002,12 +1012,12 @@ class BandOptimiserApp:
         
         # Configuration variables
         self.config = load_config()
-        self.router_ip = tk.StringVar(value=self.config.get("router_ip", "192.168.1.1"))
-        self.username = tk.StringVar(value=self.config.get("username", "admin"))
+        self.router_ip = tk.StringVar(value=self.config.get("router_ip", ""))
+        self.username = tk.StringVar(value=self.config.get("username", ""))
         self.password = tk.StringVar(value=self.config.get("password", ""))
         self.auto_connect = tk.BooleanVar(value=self.config.get("auto_connect", False))
         self.use_api_lib = tk.BooleanVar(value=self.config.get("use_api_lib", True))
-        self.speedtest_on_startup = tk.BooleanVar(value=self.config.get("speedtest_on_startup", True))
+        self.speedtest_on_startup = tk.BooleanVar(value=self.config.get("speedtest_on_startup", False))
         
         # Set up traces for config changes
         self.auto_connect.trace_add("write", self.save_config_callback)
@@ -1350,7 +1360,7 @@ class BandOptimiserApp:
             log_type: The type of log - 'standard', 'detailed', or 'both' (default: 'standard')
             replace_last: Whether to replace the last log message (for progress indicators)
         """
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {message}\n"
         
         # For technical/detailed messages only
@@ -1383,7 +1393,7 @@ class BandOptimiserApp:
         password = self.password.get()
         use_api_lib = self.use_api_lib.get()
         
-        self.log_message(f"Connecting to {ip}...")
+        self.log_message(f"Connecting to {ip}...", log_type="both")
         self.status_var.set("Connecting...")
         
         # Clear previous connection
@@ -1754,84 +1764,104 @@ class BandOptimiserApp:
         
         # Run in background thread to keep UI responsive
         def optimise_thread():
-            # Test each band one by one
-            results = {}
-            
-            # Test each band one by one
-            bands_to_test = [1, 3, 7, 8, 20, 28, 32, 38, 40, 41, 42]
-            
-            for band in bands_to_test:
-                self.log_message(f"🔄 Testing band B{band}...", log_type="standard")
-                self.log_message(f"Testing band B{band}...", log_type="detailed")
+            """Run the optimisation process in a background thread"""
+            try:
+                # Test each band one by one
+                results = {}
                 
-                # Apply the band selection
-                apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, [band])
+                # Test each band one by one
+                bands_to_test = [1, 3, 7, 8, 20, 28, 32, 38, 40, 41, 42]
                 
-                # Wait for connection to stabilize
-                time.sleep(12)
+                for band in bands_to_test:
+                    self.log_message(f"🔄 Testing band B{band}...", log_type="standard")
+                    self.log_message(f"Testing band B{band}...", log_type="detailed")
+                    
+                    # Apply the band selection
+                    apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, [band])
+                    
+                    # Wait for connection to stabilize
+                    time.sleep(12)
+                    
+                    # Refresh signal data
+                    signal_data = fetch_signal_data(self, self.session or self.client, self.router_ip.get(), self.token)
+                    
+                    if not signal_data:
+                        self.log_message(f"⚠️ Failed to get signal data for band B{band}", log_type="both")
+                        results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
+                        continue
+                    
+                    # Send to detailed log
+                    self.log_message(f"Band B{band} signal data: {signal_data}", log_type="detailed")
+                    
+                    # Get signal metrics
+                    rsrp = signal_data.get("RSRP", "-120dBm")
+                    if isinstance(rsrp, str) and "dBm" in rsrp:
+                        rsrp = rsrp.replace("dBm", "")
+                    rsrp_float = float(rsrp)
+                    
+                    sinr = signal_data.get("SINR", "0dB")
+                    if isinstance(sinr, str) and "dB" in sinr:
+                        sinr = sinr.replace("dB", "")
+                    sinr_float = float(sinr)
+                    
+                    # Simple scoring algorithm considering RSRP and SINR
+                    # RSRP range: -140 to -44 (higher is better)
+                    # SINR range: -20 to 30 (higher is better)
+                    
+                    # Normalize RSRP to 0-100 range where 100 is best (-44dBm) and 0 is worst (-140dBm)
+                    rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
+                    
+                    # Normalize SINR to 0-100 range where 100 is best (30dB) and 0 is worst (-20dB)
+                    sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
+                    
+                    # Final score with more weight on RSRP (60%) than SINR (40%)
+                    score = 0.6 * rsrp_norm + 0.4 * sinr_norm
+                    
+                    network_type = signal_data.get("NETWORK_TYPE", "4G")
+                    
+                    # Store results
+                    results[band] = {
+                        "score": score,
+                        "rsrp": rsrp_float,
+                        "sinr": sinr_float,
+                        "network_type": network_type,
+                        "failed": False
+                    }
+                    
+                    # Show simple result in log
+                    self.log_message(f"📊 Band B{band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
                 
-                # Refresh signal data
-                signal_data = fetch_signal_data(self, self.session or self.client, self.router_ip.get(), self.token)
+                # Generate report
+                report_path = generate_report(results, "basic")
+
+                # Find top bands
+                sorted_bands = sorted(results.items(), key=lambda x: x[1]["score"], reverse=True)
+                top_bands = [f"B{band}" for band, data in sorted_bands if data["score"] > 0][:3]
                 
-                if not signal_data:
-                    self.log_message(f"⚠️ Failed to get signal data for band B{band}", log_type="both")
-                    results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
-                    continue
+                if not top_bands:
+                    self.log_message("⚠️ No usable bands found. Try again or check connection.", log_type="both")
+                    return
                 
-                # Send to detailed log
-                self.log_message(f"Band B{band} signal data: {signal_data}", log_type="detailed")
+                # Show optimisation summary dialogue
+                self.root.after(0, lambda: self.show_optimisation_summary(top_bands, results, report_path))
                 
-                # Get signal metrics
-                rsrp = signal_data.get("RSRP", "-120dBm")
-                if isinstance(rsrp, str) and "dBm" in rsrp:
-                    rsrp = rsrp.replace("dBm", "")
-                rsrp_float = float(rsrp)
+                # Play notification sound
+                self.root.bell()
+            except Exception as e:
+                self.log_message(f"Optimisation error: {str(e)}", log_type="both")
                 
-                sinr = signal_data.get("SINR", "0dB")
-                if isinstance(sinr, str) and "dB" in sinr:
-                    sinr = sinr.replace("dB", "")
-                sinr_float = float(sinr)
-                
-                # Simple scoring algorithm considering RSRP and SINR
-                # RSRP range: -140 to -44 (higher is better)
-                # SINR range: -20 to 30 (higher is better)
-                
-                # Normalize RSRP to 0-100 range where 100 is best (-44dBm) and 0 is worst (-140dBm)
-                rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
-                
-                # Normalize SINR to 0-100 range where 100 is best (30dB) and 0 is worst (-20dB)
-                sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
-                
-                # Final score with more weight on RSRP (60%) than SINR (40%)
-                score = 0.6 * rsrp_norm + 0.4 * sinr_norm
-                
-                network_type = signal_data.get("NETWORK_TYPE", "4G")
-                
-                # Store results
-                results[band] = {
-                    "score": score,
-                    "rsrp": rsrp_float,
-                    "sinr": sinr_float,
-                    "network_type": network_type,
-                    "failed": False
-                }
-                
-                # Show simple result in log
-                self.log_message(f"📊 Band B{band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
-            
-            # Generate report
-            report_path = generate_report(results, "basic")
-            
-            # Find top bands
-            sorted_bands = sorted(results.items(), key=lambda x: x[1]["score"], reverse=True)
-            top_bands = [band for band, data in sorted_bands if data["score"] > 0][:3]
-            
-            if not top_bands:
-                self.log_message("⚠️ No usable bands found. Try again or check connection.", log_type="both")
-                return
-            
-            # Show optimisation summary dialogue
-            self.root.after(0, lambda: self.show_optimisation_summary(top_bands, results, report_path))
+            finally:
+                # Always try to restore original bands if we have them
+                try:
+                    if original_band_config:
+                        apply_band_lock(
+                            self.session or self.client,
+                            self.router_ip.get(),
+                            self.token,
+                            original_band_config
+                        )
+                except:
+                    pass
         
         threading.Thread(target=optimise_thread, daemon=True).start()
     
@@ -1852,7 +1882,10 @@ class BandOptimiserApp:
         """Enhanced optimisation thread implementation"""
         try:
             # Store original band configuration
-            original_bands = self.current_bands.copy() if hasattr(self, 'current_bands') else []
+            original_band_config = []
+            for band, var in self.band_vars.items():
+                if var.get():
+                    original_band_config.append(f"B{band}")
             
             # Initialize results dictionaries with proper typing
             results_4g = {}
@@ -1862,29 +1895,202 @@ class BandOptimiserApp:
             self.log_message("🔄 Testing 4G bands...", log_type="both")
             for band in SUPPORTED_4G_BANDS:
                 try:
-                    results = self.test_single_band(band, "4G")
-                    if results:  # Only store valid results
-                        results_4g[int(band.replace('B', ''))] = results
+                    # Apply single band
+                    success = apply_band_lock(
+                        self.session or self.client,
+                        self.router_ip.get(),
+                        self.token,
+                        [band]
+                    )
+                    if not success:
+                        self.log_message(f"Failed to apply band {band}, skipping", log_type="both")
+                        continue
+                    
+                    # Wait for band to stabilize
+                    time.sleep(12)
+                    
+                    # Get signal metrics
+                    signal_data = fetch_signal_data(
+                        self,
+                        self.session or self.client,
+                        self.router_ip.get(),
+                        self.token
+                    )
+                    
+                    if not signal_data:
+                        self.log_message(f"No signal data for band {band}, skipping", log_type="both")
+                        continue
+                    
+                    # Run speedtest
+                    speedtest_result = run_speedtest()
+                    
+                    # Get signal metrics
+                    rsrp = signal_data.get("RSRP", "-120dBm")
+                    if isinstance(rsrp, str) and "dBm" in rsrp:
+                        rsrp = rsrp.replace("dBm", "")
+                    rsrp_float = float(rsrp)
+                    
+                    sinr = signal_data.get("SINR", "0dB")
+                    if isinstance(sinr, str) and "dB" in sinr:
+                        sinr = sinr.replace("dB", "")
+                    sinr_float = float(sinr)
+                    
+                    # Calculate signal quality score
+                    rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
+                    sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
+                    signal_score = 0.6 * rsrp_norm + 0.4 * sinr_norm
+                    
+                    # Calculate speed score if speedtest successful
+                    speed_score = 0
+                    if speedtest_result["success"]:
+                        dl_norm = min(100, speedtest_result["download"] / 2)  # Normalize to 0-100 (200 Mbps max)
+                        ul_norm = min(100, speedtest_result["upload"])       # Normalize to 0-100 (100 Mbps max)
+                        ping_norm = min(100, max(0, (1000 - speedtest_result["ping"]) / 10))  # Normalize to 0-100
+                        speed_score = (dl_norm * 0.4) + (ul_norm * 0.4) + (ping_norm * 0.2)
+                    
+                    # Final score (60% signal, 40% speed if available)
+                    final_score = signal_score if speed_score == 0 else (signal_score * 0.6 + speed_score * 0.4)
+                    
+                    # Store results
+                    band_num = int(band.replace("B", ""))
+                    results_4g[band_num] = {
+                        "score": final_score,
+                        "rsrp": rsrp_float,
+                        "sinr": sinr_float,
+                        "network_type": "4G",
+                        "signal_score": signal_score,
+                        "speed_score": speed_score,
+                        "failed": False
+                    }
+                    
+                    if speedtest_result["success"]:
+                        results_4g[band_num].update({
+                            "download_mbps": speedtest_result["download"],
+                            "upload_mbps": speedtest_result["upload"],
+                            "ping_ms": speedtest_result["ping"]
+                        })
+                    
+                    # Show result in log
+                    self.log_message(
+                        f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, "
+                        f"Score: {final_score:.1f}" + 
+                        (f", Speed: {speedtest_result['download']:.1f}/{speedtest_result['upload']:.1f} Mbps" 
+                         if speedtest_result["success"] else ""),
+                        log_type="both"
+                    )
+                    
                 except Exception as e:
                     self.log_message(f"Error testing band {band}: {str(e)}", log_type="both")
                     continue
             
-            # Test 5G bands
+            # Test 5G bands if supported
             self.log_message("🔄 Testing 5G bands...", log_type="both")
             for band in SUPPORTED_5G_BANDS:
                 try:
-                    results = self.test_single_band(band, "5G")
-                    if results:  # Only store valid results
-                        results_5g[int(band.replace('B', ''))] = results
+                    # Apply single band
+                    success = apply_band_lock(
+                        self.session or self.client,
+                        self.router_ip.get(),
+                        self.token,
+                        [band]
+                    )
+                    if not success:
+                        self.log_message(f"Failed to apply band {band}, skipping", log_type="both")
+                        continue
+                    
+                    # Wait for band to stabilize
+                    time.sleep(12)
+                    
+                    # Get signal metrics
+                    signal_data = fetch_signal_data(
+                        self,
+                        self.session or self.client,
+                        self.router_ip.get(),
+                        self.token
+                    )
+                    
+                    if not signal_data:
+                        self.log_message(f"No signal data for band {band}, skipping", log_type="both")
+                        continue
+                    
+                    # Run speedtest
+                    speedtest_result = run_speedtest()
+                    
+                    # Get signal metrics
+                    rsrp = signal_data.get("RSRP", "-120dBm")
+                    if isinstance(rsrp, str) and "dBm" in rsrp:
+                        rsrp = rsrp.replace("dBm", "")
+                    rsrp_float = float(rsrp)
+                    
+                    sinr = signal_data.get("SINR", "0dB")
+                    if isinstance(sinr, str) and "dB" in sinr:
+                        sinr = sinr.replace("dB", "")
+                    sinr_float = float(sinr)
+                    
+                    # Calculate signal quality score
+                    rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
+                    sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
+                    signal_score = 0.6 * rsrp_norm + 0.4 * sinr_norm
+                    
+                    # Calculate speed score if speedtest successful
+                    speed_score = 0
+                    if speedtest_result["success"]:
+                        dl_norm = min(100, speedtest_result["download"] / 4)  # Normalize to 0-100 (400 Mbps max for 5G)
+                        ul_norm = min(100, speedtest_result["upload"] / 2)    # Normalize to 0-100 (200 Mbps max for 5G)
+                        ping_norm = min(100, max(0, (1000 - speedtest_result["ping"]) / 10))  # Normalize to 0-100
+                        speed_score = (dl_norm * 0.4) + (ul_norm * 0.4) + (ping_norm * 0.2)
+                    
+                    # Final score (60% signal, 40% speed if available)
+                    final_score = signal_score if speed_score == 0 else (signal_score * 0.6 + speed_score * 0.4)
+                    
+                    # Store results
+                    band_num = int(band.replace("n", ""))
+                    results_5g[band_num] = {
+                        "score": final_score,
+                        "rsrp": rsrp_float,
+                        "sinr": sinr_float,
+                        "network_type": "5G",
+                        "signal_score": signal_score,
+                        "speed_score": speed_score,
+                        "failed": False
+                    }
+                    
+                    if speedtest_result["success"]:
+                        results_5g[band_num].update({
+                            "download_mbps": speedtest_result["download"],
+                            "upload_mbps": speedtest_result["upload"],
+                            "ping_ms": speedtest_result["ping"]
+                        })
+                    
+                    # Show result in log
+                    self.log_message(
+                        f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, "
+                        f"Score: {final_score:.1f}" + 
+                        (f", Speed: {speedtest_result['download']:.1f}/{speedtest_result['upload']:.1f} Mbps" 
+                         if speedtest_result["success"] else ""),
+                        log_type="both"
+                    )
+                    
                 except Exception as e:
                     if "112003" in str(e):
                         self.log_message(f"Band {band} not supported by this device", log_type="both")
                     else:
                         self.log_message(f"Error testing band {band}: {str(e)}", log_type="both")
                     continue
-
+            
             # Process results and find optimal combinations
-            recommended_results = self.process_enhanced_results(results_4g, results_5g)
+            recommended_results = {}
+            
+            # Get top 2 4G bands
+            if results_4g:
+                sorted_4g = sorted(results_4g.items(), key=lambda x: x[1]["score"], reverse=True)
+                recommended_results["4G"] = [f"B{band}" for band, _ in sorted_4g[:2]]
+            
+            # Get best 5G band if available
+            if results_5g:
+                sorted_5g = sorted(results_5g.items(), key=lambda x: x[1]["score"], reverse=True)
+                if sorted_5g:
+                    recommended_results["5G"] = [f"n{band}" for band, _ in sorted_5g[:1]]
             
             # Generate report
             report_path = generate_report({
@@ -1898,12 +2104,15 @@ class BandOptimiserApp:
                 results_4g, results_5g, recommended_results, report_path
             ))
             
+            # Play notification sound
+            self.root.bell()
+            
         except Exception as e:
             self.log_message(f"Enhanced optimisation error: {str(e)}", log_type="both")
             # Attempt to restore original bands
             try:
-                if original_bands:
-                    self.apply_band_selection(original_bands)
+                if original_band_config:
+                    self.apply_band_selection(original_band_config)
             except Exception as restore_error:
                 self.log_message(f"Failed to restore original bands: {str(restore_error)}", log_type="both")
     
@@ -2209,7 +2418,7 @@ class BandOptimiserApp:
 
 A tool for optimising band selection on Huawei CPE Pro 2 routers.
 
-Version: 1.0.1
+Version: 1.0.2
 Author: Rare
 Licence: MIT"""
         
@@ -2593,9 +2802,9 @@ Licence: MIT"""
             
             def apply_thread():
                 success = apply_band_lock(
-                    self.session or self.client, 
-                    self.router_ip.get(), 
-                    self.token, 
+                    self.session or self.client,
+                    self.router_ip.get(),
+                    self.token,
                     selected_bands
                 )
                 
@@ -2646,7 +2855,6 @@ Licence: MIT"""
             
             dialogue.destroy()
 
-        
         def view_report():
             self.view_report(report_path)
         
