@@ -1,3 +1,19 @@
+import sys
+
+# Global exception hook to suppress Windows-specific errors
+def global_exception_handler(exctype, value, traceback):
+    # Suppress Windows-specific errors that we can't fix
+    error_msg = str(value)
+    if (exctype == TypeError and ("WPARAM is simple" in error_msg or 
+                                "WNDPROC return value cannot be converted to LRESULT" in error_msg)):
+        # Silently ignore these specific Windows-related errors
+        return
+    # For all other exceptions, use the default exception handler
+    sys.__excepthook__(exctype, value, traceback)
+
+# Set the global exception hook
+sys.excepthook = global_exception_handler
+
 import tkinter as tk
 from tkinter import messagebox, ttk, Checkbutton, IntVar, filedialog, scrolledtext
 import json
@@ -14,7 +30,6 @@ import os
 from datetime import datetime
 import inspect
 import webbrowser
-import sys
 import ipaddress
 import random
 import uuid
@@ -436,7 +451,7 @@ def fetch_signal_data_api(self, client, ip):
             signal_data['band'] = device_signal.get('band', '--')
             
             # Convert band information to user-friendly format if needed
-            if signal_data['band'].startswith("LTE BAND"):
+            if signal_data['band'] and isinstance(signal_data['band'], str) and signal_data['band'].startswith("LTE BAND"):
                 signal_data['band'] = f"B{signal_data['band'].replace('LTE BAND', '').strip()}"
             
             # Get connection status for network information
@@ -497,7 +512,7 @@ def fetch_signal_data(self, session, ip, token):
                     signal_data['band'] = data['response'].get('band', '--')
                     
                     # Make band info more user-friendly
-                    if signal_data['band'].startswith("LTE BAND"):
+                    if signal_data['band'] and isinstance(signal_data['band'], str) and signal_data['band'].startswith("LTE BAND"):
                         signal_data['band'] = f"B{signal_data['band'].replace('LTE BAND', '').strip()}"
             except ValueError:
                 self.log_message("Error parsing signal data response", log_type="detailed")
@@ -845,46 +860,6 @@ class BandOptimiserApp(tk.Frame):
         self.master = master
         self.pack(fill=tk.BOTH, expand=True)
         
-        # Set window title and size
-        self.master.title("Huawei CPE Pro 2 Band Scanner and Optimizer")
-        self.master.geometry("800x600")
-        self.master.minsize(800, 600)
-        
-        # Create variables
-        self.router_ip = tk.StringVar(value="192.168.8.1")
-        self.username = tk.StringVar(value="admin")
-        self.password = tk.StringVar()
-        self.session = None
-        self.client = None  # For huawei-lte-api
-        self.token = None
-        self.is_connected = False
-        self.signal_info = {}
-        self.band_vars = {}  # Dictionary for band selection checkboxes
-        self.band_vars_4g = {}
-        self.band_vars_5g = {}
-        self.auto_refresh = tk.BooleanVar(value=False)
-        self.monitor_bands = tk.BooleanVar(value=False)
-        self.minimize_to_tray = tk.BooleanVar(value=False)  # Minimize to tray option
-        self.last_applied_bands = []
-        self.poll_status_task = None  # Task for auto-refresh
-        self.config = {}     # Configuration dictionary
-        self.tray_icon = None  # System tray icon
-        
-        # Initialize available bands with defaults
-        self.available_bands = {
-            "4G": SUPPORTED_4G_BANDS,
-            "5G": SUPPORTED_5G_BANDS
-        }
-        
-        # Set icon path
-        self.icon_path = "assets/icon.ico"
-        
-        # Set icon
-        try:
-            self.master.iconbitmap(self.icon_path)
-        except:
-            pass
-        
         # Initialize config
         self.config = {}
         
@@ -898,22 +873,16 @@ class BandOptimiserApp(tk.Frame):
         self.is_connected = False
         self.api_restriction_warning_shown = False
         self.signal_update_interval = 30000  # 30 seconds
-        self.poll_status_task = None  # Initialize to None
+        self.poll_status_task = None  # Initialize to track auto-refresh
         
-        # Auto-connect option
+        # UI state variables
+        self.status_var = tk.StringVar(value="Not Connected")
         self.auto_connect = tk.BooleanVar(value=False)
-        
-        # API lib option
         self.use_api_lib = tk.BooleanVar(value=True)
-        
-        # Auto-refresh option for signal
         self.auto_refresh = tk.BooleanVar(value=False)
-        
-        # Monitor bands option
         self.monitor_bands = tk.BooleanVar(value=False)
-        
-        # Speedtest on startup
         self.run_speed_on_start = tk.BooleanVar(value=False)
+        self.minimize_to_tray = tk.BooleanVar(value=False)
         
         # Band selection variables
         self.band_vars = {}
@@ -929,14 +898,17 @@ class BandOptimiserApp(tk.Frame):
         self.upload_band_vars = {}
         self.download_band_vars = {}
         
+        # Initialize available bands with defaults
+        self.available_bands = {
+            "4G": SUPPORTED_4G_BANDS,
+            "5G": SUPPORTED_5G_BANDS
+        }
+        
         # Initialize band variables for network aggregation
         for band_num in [1, 3, 7, 8]:
             band = f"B{band_num}"
             self.upload_band_vars[band] = tk.BooleanVar()
             self.download_band_vars[band] = tk.BooleanVar()
-        
-        # Signal info variables
-        self.status_var = tk.StringVar(value="Not Connected")
         
         # Create dictionary for signal information display
         self.signal_info = {
@@ -953,9 +925,26 @@ class BandOptimiserApp(tk.Frame):
         # Create log text widget for detailed status display
         self.log_text = None
         
-        # Initialize UI
+        # Set icon path
+        self.icon_path = "assets/icon.ico"
+        
+        # Initialize tray icon to None
+        self.tray_icon = None
+        
+        # Create UI elements
         self.create_menu()
         self.create_main_frame()
+        
+        # Set window title and size
+        self.master.title("Huawei CPE Pro 2 Band Scanner and Optimizer")
+        self.master.geometry("800x600")
+        self.master.minsize(800, 600)
+        
+        # Set icon
+        try:
+            self.master.iconbitmap(self.icon_path)
+        except:
+            pass
         
         # Load config file if available
         self.load_config()
@@ -1552,12 +1541,11 @@ class BandOptimiserApp(tk.Frame):
     
     def refresh_signal(self):
         # Disable refresh button while refreshing
-        self.refresh_button.config(state=tk.DISABLED)
+        if hasattr(self, 'refresh_button'):
+            self.refresh_button.config(state=tk.DISABLED)
         
-        # Create and start thread for signal refresh
-        refresh_thread_obj = threading.Thread(target=self.refresh_thread)
-        refresh_thread_obj.daemon = True
-        refresh_thread_obj.start()
+        # Run in background thread
+        threading.Thread(target=self.refresh_thread, daemon=True).start()
 
     def refresh_thread(self):
         """Background thread for refreshing signal data"""
@@ -1565,6 +1553,11 @@ class BandOptimiserApp(tk.Frame):
             # Get router IP
             ip = self.router_ip.get()
             token = self.token
+            
+            # Get the current band before refresh (if available)
+            previous_band = None
+            if hasattr(self, 'signal_info') and 'BAND' in self.signal_info:
+                previous_band = self.signal_info['BAND'].get()
             
             # Fetch the signal data using the appropriate method
             if self.client is not None:
@@ -1582,9 +1575,31 @@ class BandOptimiserApp(tk.Frame):
                 # Log the data for debugging
                 self.log_message(f"Signal data received: {signal_data}", log_type="detailed")
                 
-                # Send notification with current band if it exists and we're refreshing after initial connection
-                if 'band' in signal_data and hasattr(self, 'send_initial_notification') and self.send_initial_notification:
-                    self.send_initial_notification = False
+                # Check if the band has changed since the previous check
+                current_band = signal_data.get('band', 'N/A')
+                band_changed = (
+                    previous_band is not None and 
+                    current_band is not None and 
+                    current_band != 'N/A' and 
+                    current_band != '--' and 
+                    current_band != previous_band
+                )
+                
+                # Determine if we need to show a notification
+                show_notification = False
+                
+                # Show notification when first connected
+                if hasattr(self, 'send_initial_notification') and self.send_initial_notification:
+                    show_notification = True
+                    self.send_initial_notification = False  # Reset the flag
+                
+                # Show notification if the band has changed
+                elif band_changed:
+                    show_notification = True
+                    self.log_message(f"Band changed: {previous_band} → {current_band}", log_type="both")
+                
+                # Show notification if needed
+                if show_notification and current_band and current_band != 'N/A' and current_band != '--':
                     try:
                         toaster = ToastNotifier()
                         
@@ -1607,7 +1622,7 @@ class BandOptimiserApp(tk.Frame):
                         rsrp = signal_data.get('rsrp', 'N/A')
                         
                         notification_title = f"Huawei Band Scanner - {network_type}"
-                        notification_msg = f"Connected on band {signal_data['band']}\nSignal: {rsrp}"
+                        notification_msg = f"Active band: {current_band}\nSignal: {rsrp}"
                         
                         toaster.show_toast(
                             notification_title,
@@ -1625,6 +1640,10 @@ class BandOptimiserApp(tk.Frame):
                 self.log_message("Failed to fetch signal data", log_type="both")
         except Exception as e:
             self.log_message(f"Error refreshing signal: {str(e)}", log_type="both")
+        finally:
+            # Re-enable refresh button
+            if hasattr(self, 'refresh_button'):
+                self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
     
     def update_signal_ui(self, signal_data):
         # Define mapping between signal_data keys and display keys
@@ -1638,6 +1657,11 @@ class BandOptimiserApp(tk.Frame):
             'download': 'DOWNLOAD',
             'upload': 'UPLOAD'
         }
+        
+        # Log current signal values for debugging
+        self.log_message(f"Updating signal UI with new data: " +
+                       f"Band: {signal_data.get('band', 'N/A')}, " +
+                       f"RSRP: {signal_data.get('rsrp', 'N/A')}", log_type="detailed")
         
         # Update each field if data exists
         for data_key, ui_key in field_mapping.items():
@@ -1666,47 +1690,90 @@ class BandOptimiserApp(tk.Frame):
                     
                     self.signal_info[ui_key].set(display_value)
                 else:
-                    self.signal_info[ui_key].set(signal_data[data_key])
+                    # Use data as is
+                    display_value = signal_data[data_key]
+                    
+                # Handle empty or null values
+                if display_value is None or display_value == '' or display_value == '--':
+                    display_value = 'N/A'
+                
+                self.signal_info[ui_key].set(display_value)
         
-        # Update band checkboxes based on current connected band
-        if 'band' in signal_data and signal_data['band'] and hasattr(self, 'band_vars'):
-            current_band = signal_data['band']
-            self.log_message(f"Current connected band: {current_band}", log_type="detailed")
+        # Update the band checkboxes based on the current active band
+        if 'band' in signal_data and signal_data['band'] and signal_data['band'] != '--' and signal_data['band'] != 'N/A':
+            active_band = signal_data['band']
+            self.log_message(f"Active band detected: {active_band}", log_type="detailed")
             
-            # Clear all band checkboxes first
-            for band_name, var in self.band_vars.items():
+            # First, uncheck all bands
+            for band, var in self.band_vars.items():
                 var.set(False)
             
-            # Handle cases where multiple bands are reported (e.g., "B1,B3")
-            if ',' in current_band:
-                band_list = [b.strip() for b in current_band.split(',')]
-            else:
-                band_list = [current_band.strip()]
+            # Try to find the band in our checkboxes with different formats
+            found = False
             
-            # Check the corresponding checkboxes
-            for band in band_list:
-                # Strip any extra text around band names
-                if 'B' in band:
-                    # Handle formats like "LTE B1" or just "B1"
-                    band_name = band[band.find('B'):]
-                elif 'n' in band:
-                    # Handle formats like "NR n78" or just "n78"
-                    band_name = band[band.find('n'):]
-                else:
-                    # If no prefix, assume 4G band and add 'B'
-                    band_name = f"B{band}"
+            # Direct match
+            if active_band in self.band_vars:
+                self.band_vars[active_band].set(True)
+                self.log_message(f"Updated band selection UI to show active band: {active_band}", log_type="detailed")
+                found = True
+            # If the band is a number without the "B" prefix, try with the prefix
+            elif active_band.isdigit() and f"B{active_band}" in self.band_vars:
+                self.band_vars[f"B{active_band}"].set(True)
+                self.log_message(f"Updated band selection UI to show active band: B{active_band}", log_type="detailed")
+                found = True
+            # If the band has a "B" prefix, try without it
+            elif active_band.startswith('B') and active_band[1:].isdigit() and active_band[1:] in self.band_vars:
+                self.band_vars[active_band[1:]].set(True)
+                self.log_message(f"Updated band selection UI to show active band: {active_band[1:]}", log_type="detailed")
+                found = True
                 
-                # Set the band checkbox if it exists
-                if band_name in self.band_vars:
-                    self.band_vars[band_name].set(True)
-                    self.log_message(f"Setting band {band_name} checkbox active", log_type="detailed")
+            if not found:
+                self.log_message(f"Could not find checkbox for active band: {active_band} (not in available bands)", log_type="detailed")
+                # Log available bands for debugging
+                self.log_message(f"Available band checkboxes: {list(self.band_vars.keys())}", log_type="detailed")
         
-        # Log the updated signal information
-        self.log_message(f"Signal updated: RSRP: {signal_data.get('rsrp', '--')}, "
-                         f"SINR: {signal_data.get('sinr', '--')}, "
-                         f"Band: {signal_data.get('band', '--')}", 
-                         log_type="detailed")
+        # Update RSRP color
+        self.update_rsrp_color(signal_data.get('rsrp', 'N/A'))
     
+    def update_rsrp_color(self, rsrp_value):
+        """Update the RSRP display color based on signal strength"""
+        try:
+            # Extract the numeric value from the RSRP string (remove "dBm" if present)
+            if isinstance(rsrp_value, str):
+                if "dBm" in rsrp_value:
+                    rsrp_value = rsrp_value.replace("dBm", "").strip()
+                if rsrp_value == "N/A" or rsrp_value == "--":
+                    # No valid RSRP value
+                    return
+                
+            # Convert to float
+            rsrp_float = float(rsrp_value)
+            
+            # Determine color based on RSRP value
+            # Excellent: > -80 dBm
+            # Good: -80 to -90 dBm
+            # Fair: -90 to -100 dBm
+            # Poor: < -100 dBm
+            if rsrp_float >= -80:
+                color = "#00CC00"  # Green
+            elif rsrp_float >= -90:
+                color = "#99CC00"  # Light green
+            elif rsrp_float >= -100:
+                color = "#CCCC00"  # Yellow
+            else:
+                color = "#CC0000"  # Red
+                
+            # Update the RSRP label color if it exists
+            if hasattr(self, "signal_info") and "RSRP" in self.signal_info:
+                if hasattr(self.signal_info["RSRP"], "config"):
+                    # If it's a label
+                    self.signal_info["RSRP"].config(foreground=color)
+                # For StringVars we don't change colors, as they don't have a direct color property
+        except Exception as e:
+            # Silently fail if there's any error - this is non-essential functionality
+            self.log_message(f"Error updating RSRP color: {str(e)}", log_type="detailed")
+            pass
+
     def show_enhanced_optimisation_summary(self, results_4g, results_5g, recommended_results, report_path):
         """Show enhanced optimisation summary with separate 4G and 5G results"""
         # Get original band config
@@ -2201,34 +2268,50 @@ Licence: MIT"""
 
     def toggle_auto_refresh(self):
         """Toggle automatic signal refresh"""
-        self.auto_refresh.set(not self.auto_refresh.get())
-        if self.auto_refresh.get():
+        # Toggle the auto-refresh setting
+        current_state = self.auto_refresh.get()
+        self.auto_refresh.set(not current_state)
+        new_state = self.auto_refresh.get()
+        
+        # Cancel any existing poll task first
+        if hasattr(self, 'poll_status_task') and self.poll_status_task:
+            self.master.after_cancel(self.poll_status_task)
+            self.poll_status_task = None
+            self.log_message("Cancelled existing polling task", log_type="detailed")
+        
+        # If enabling auto-refresh
+        if new_state:
             self.log_message("Auto-refresh enabled. Signal will update every 30 seconds.", log_type="both")
             # Start the polling if we're connected
             if hasattr(self, 'is_connected') and self.is_connected:
+                # Start a new polling task
                 self.poll_status()
+                self.log_message("Started polling task", log_type="detailed")
             else:
                 self.log_message("Auto-refresh will begin after connecting to router", log_type="both")
         else:
             self.log_message("Auto-refresh disabled.", log_type="both")
-            # Cancel polling task if it exists
-            if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                self.master.after_cancel(self.poll_status_task)
-                self.poll_status_task = None
-
+    
     def poll_status(self):
         """Poll signal status at regular intervals"""
-        if hasattr(self, 'is_connected') and self.is_connected:
+        try:
+            # Check if we should still be polling
+            if not (hasattr(self, 'is_connected') and self.is_connected and self.auto_refresh.get()):
+                self.log_message("Polling stopped - disconnected or auto-refresh disabled", log_type="detailed")
+                self.poll_status_task = None
+                return
+                
             # Refresh signal data
             self.refresh_signal()
+            self.log_message("Auto-refreshed signal data", log_type="detailed")
             
-            # Add band monitoring if enabled
-            if hasattr(self, 'monitor_bands') and self.monitor_bands.get():
-                self.check_band_lock()
-        
-        # Schedule next update if auto-refresh is still enabled
-        if hasattr(self, 'auto_refresh') and self.auto_refresh.get():
-            self.poll_status_task = self.master.after(60000, self.poll_status)  # Check every 60 seconds
+            # Schedule the next refresh
+            self.poll_status_task = self.master.after(30000, self.poll_status)
+            
+        except Exception as e:
+            self.log_message(f"Error in polling task: {str(e)}", log_type="detailed")
+            # Try to reschedule even if there was an error
+            self.poll_status_task = self.master.after(30000, self.poll_status)
 
     def check_band_lock(self):
         """Check if current band matches user selection and reapply if needed"""
@@ -2323,16 +2406,7 @@ Licence: MIT"""
             self.log_message(f"Error in band monitoring: {str(e)}", log_type="detailed")
 
     def apply_band_selection(self):
-        """Apply the selected bands to the router"""
-        if not hasattr(self, 'is_connected') or not self.is_connected:
-            self.log_message("Not connected. Cannot apply band selection.", log_type="both")
-            return
-        
-        # Disable the apply button to prevent multiple clicks
-        if hasattr(self, 'apply_bands_button'):
-            self.apply_bands_button.config(state=tk.DISABLED)
-        
-        # Get selected bands
+        """Apply band selection to router"""
         selected_bands = []
         
         for band, var in self.band_vars.items():
@@ -2358,7 +2432,13 @@ Licence: MIT"""
                 
                 if success:
                     self.master.after(0, lambda: self.log_message("Band selection applied successfully. Changes may take up to 30 seconds to take effect.", log_type="both"))
-                    self.master.after(5000, self.refresh_signal)  # Refresh after a delay
+                    
+                    # Wait a moment for the router to apply changes, then refresh signal data
+                    time.sleep(3)
+                    self.master.after(0, self.refresh_signal)
+                    
+                    # Schedule additional refresh after a longer delay to ensure we get updated values
+                    self.master.after(15000, self.refresh_signal)
                 else:
                     self.master.after(0, lambda: self.log_message("Failed to apply band selection. Check connection.", log_type="both"))
             finally:
@@ -2480,18 +2560,41 @@ Licence: MIT"""
                 # Test each band one by one - use available bands
                 bands_to_test = self.available_bands["4G"] if hasattr(self, 'available_bands') else []
                 
+                # Track how many bands we've tested successfully
+                successful_tests = 0
+                
                 for band in bands_to_test:
                     self.log_message(f"🔄 Testing band {band}...", log_type="standard")
                     self.log_message(f"Testing band {band}...", log_type="detailed")
                     
                     # Apply the band selection
-                    apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, [band])
+                    try:
+                        apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, [band])
+                    except Exception as e:
+                        if "Band not supported by this device" in str(e):
+                            self.log_message(f"⚠️ Band {band} is not supported by this device", log_type="both")
+                            results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True, "unsupported": True}
+                            continue
+                        else:
+                            self.log_message(f"Error applying band lock: {str(e)}", log_type="both")
+                            results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
+                            continue
                     
                     # Wait for connection to stabilize
                     time.sleep(12)
                     
                     # Refresh signal data
-                    signal_data = self.fetch_signal_data(self.session, self.router_ip.get(), self.token)
+                    try:
+                        if hasattr(self, 'client') and self.client:
+                            # Using API client
+                            signal_data = fetch_signal_data_api(self, self.client, self.router_ip.get())
+                        else:
+                            # Using web interface
+                            signal_data = fetch_signal_data(self, self.session, self.router_ip.get(), self.token)
+                    except Exception as e:
+                        self.log_message(f"Error fetching signal data: {str(e)}", log_type="both")
+                        results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
+                        continue
                     
                     if not signal_data:
                         self.log_message(f"⚠️ Failed to get signal data for band {band}", log_type="both")
@@ -2502,42 +2605,55 @@ Licence: MIT"""
                     self.log_message(f"Band {band} signal data: {signal_data}", log_type="detailed")
                     
                     # Get signal metrics
-                    rsrp_str = signal_data.get("rsrp", "-120 dBm")
-                    if isinstance(rsrp_str, str) and "dBm" in rsrp_str:
-                        rsrp_str = rsrp_str.replace("dBm", "").strip()
-                    rsrp_float = float(rsrp_str)
-                    
-                    sinr_str = signal_data.get("sinr", "0 dB")
-                    if isinstance(sinr_str, str) and "dB" in sinr_str:
-                        sinr_str = sinr_str.replace("dB", "").strip()
-                    sinr_float = float(sinr_str)
-                    
-                    # Simple scoring algorithm considering RSRP and SINR
-                    # RSRP range: -140 to -44 (higher is better)
-                    # SINR range: -20 to 30 (higher is better)
-                    
-                    # Normalize RSRP to 0-100 range where 100 is best (-44dBm) and 0 is worst (-140dBm)
-                    rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
-                    
-                    # Normalize SINR to 0-100 range where 100 is best (30dB) and 0 is worst (-20dB)
-                    sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
-                    
-                    # Final score with more weight on RSRP (60%) than SINR (40%)
-                    score = 0.6 * rsrp_norm + 0.4 * sinr_norm
-                    
-                    network_type = signal_data.get("mode", "4G")
-                    
-                    # Store results - use band string as key
-                    results[band] = {
-                        "score": score,
-                        "rsrp": rsrp_float,
-                        "sinr": sinr_float,
-                        "network_type": network_type,
-                        "failed": False
-                    }
-                    
-                    # Show simple result in log
-                    self.log_message(f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
+                    try:
+                        rsrp_str = signal_data.get("rsrp", "-120 dBm")
+                        if isinstance(rsrp_str, str) and "dBm" in rsrp_str:
+                            rsrp_str = rsrp_str.replace("dBm", "").strip()
+                        rsrp_float = float(rsrp_str)
+                        
+                        sinr_str = signal_data.get("sinr", "0 dB")
+                        if isinstance(sinr_str, str) and "dB" in sinr_str:
+                            sinr_str = sinr_str.replace("dB", "").strip()
+                        sinr_float = float(sinr_str)
+                        
+                        # Simple scoring algorithm considering RSRP and SINR
+                        # RSRP range: -140 to -44 (higher is better)
+                        # SINR range: -20 to 30 (higher is better)
+                        
+                        # Normalize RSRP to 0-100 range where 100 is best (-44dBm) and 0 is worst (-140dBm)
+                        rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
+                        
+                        # Normalize SINR to 0-100 range where 100 is best (30dB) and 0 is worst (-20dB)
+                        sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
+                        
+                        # Final score with more weight on RSRP (60%) than SINR (40%)
+                        score = 0.6 * rsrp_norm + 0.4 * sinr_norm
+                        
+                        network_type = signal_data.get("mode", "4G")
+                        
+                        # Store results - use band string as key
+                        results[band] = {
+                            "score": score,
+                            "rsrp": rsrp_float,
+                            "sinr": sinr_float,
+                            "network_type": network_type,
+                            "failed": False
+                        }
+                        
+                        # Show simple result in log
+                        self.log_message(f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, Score: {score:.1f}", log_type="standard")
+                        
+                        # Count successful test
+                        successful_tests += 1
+                    except Exception as e:
+                        self.log_message(f"Error processing signal data for band {band}: {str(e)}", log_type="both")
+                        results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
+                        continue
+                
+                # Check if we have any successful results
+                if successful_tests == 0:
+                    self.log_message("⚠️ No usable bands found. Try again or check connection.", log_type="both")
+                    return
                 
                 # Generate report
                 report_path = generate_report(results, "basic")
@@ -2551,20 +2667,33 @@ Licence: MIT"""
                     return
                 
                 # Show optimisation summary dialogue
-                self.root.after(0, lambda: self.show_optimisation_summary(top_bands, results, report_path))
+                self.master.after(0, lambda: self.show_optimisation_summary(top_bands, results, report_path))
                 
                 # Play notification sound
-                self.root.bell()
+                self.master.bell()
             except Exception as e:
                 self.log_message(f"Optimisation error: {str(e)}", log_type="both")
+                # Try to restore the original band configuration
+                try:
+                    # Get original band config
+                    original_band_config = []
+                    for band, var in self.band_vars.items():
+                        if var.get():
+                            original_band_config.append(band)
+                    
+                    if original_band_config:
+                        self.log_message(f"Restoring original band configuration: {', '.join(original_band_config)}", log_type="detailed")
+                        apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, original_band_config)
+                except Exception as restore_error:
+                    self.log_message(f"Failed to restore original band configuration: {str(restore_error)}", log_type="detailed")
             finally:
                 # Re-enable buttons when done
                 if hasattr(self, 'optimise_button'):
-                    self.root.after(0, lambda: self.optimise_button.config(state=tk.NORMAL))
+                    self.master.after(0, lambda: self.optimise_button.config(state=tk.NORMAL))
                 if hasattr(self, 'enhanced_optimise_button'):
-                    self.root.after(0, lambda: self.enhanced_optimise_button.config(state=tk.NORMAL))
+                    self.master.after(0, lambda: self.enhanced_optimise_button.config(state=tk.NORMAL))
                 if hasattr(self, 'speedtest_button'):
-                    self.root.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
+                    self.master.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
         
         # Start the thread
         thread = threading.Thread(target=optimise_thread, daemon=True)
@@ -2950,14 +3079,19 @@ Licence: MIT"""
         try:
             self.tray_icon.run()
         except TypeError as e:
-            # Suppress the WPARAM error that can occur on Windows
-            if "WPARAM is simple" in str(e):
-                # Silently ignore this specific Windows-related error
+            # Suppress Windows-specific errors
+            error_msg = str(e)
+            if any(err in error_msg for err in ["WPARAM is simple", "WNDPROC return value", "LRESULT"]):
+                # Silently ignore these specific Windows-related errors
                 pass
             else:
                 print(f"Tray icon error: {str(e)}")
         except Exception as e:
-            print(f"Tray icon error: {str(e)}")
+            if "WNDPROC" in str(e) or "WPARAM" in str(e) or "LRESULT" in str(e):
+                # Also ignore Windows-specific errors that might be raised as different exception types
+                pass
+            else:
+                print(f"Tray icon error: {str(e)}")
 
     def show_window(self, icon=None, item=None):
         """Show the window from system tray"""
