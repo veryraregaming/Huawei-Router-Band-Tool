@@ -1365,6 +1365,15 @@ class BandOptimiserApp(tk.Frame):
             
             # Also print to console for debugging
             print(timestamped_message)
+        except TypeError as e:
+            # Suppress the WPARAM TypeError which can occur with Windows tray icon integration
+            if "WPARAM is simple" in str(e):
+                # Silently ignore this specific Windows-related error
+                pass
+            else:
+                # For other TypeError exceptions, still log to console
+                print(f"[{timestamp}] {message}")
+                print(f"[{timestamp}] Error logging: {str(e)}")
         except Exception as e:
             # If we can't log to the UI, at least print to console
             print(f"[{timestamp}] {message}")
@@ -2889,13 +2898,14 @@ Licence: MIT"""
             "password": self.password.get(),  # Save password as-is
             "auto_refresh": self.auto_refresh.get(),
             "monitor_bands": self.monitor_bands.get(),
-            "minimize_to_tray": self.minimize_to_tray.get()
+            "minimize_to_tray": self.minimize_to_tray.get(),
+            "auto_connect": self.auto_connect.get()
         }
         
         # Save to file
         try:
             with open("config.json", "w") as f:
-                json.dump(config, f)
+                json.dump(config, f, indent=4, sort_keys=True)
             self.log_message("Configuration saved", log_type="detailed")
         except Exception as e:
             self.log_message(f"Failed to save configuration: {str(e)}", log_type="detailed")
@@ -2924,7 +2934,7 @@ Licence: MIT"""
             self.tray_icon = pystray.Icon("Huawei Band Scanner", icon_image, "Huawei Band Scanner", menu)
             
             # Start tray icon in a separate thread
-            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            threading.Thread(target=self._run_tray_icon, daemon=True).start()
             
             # Bind window close event
             self.master.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -2934,6 +2944,20 @@ Licence: MIT"""
             self.log_message(f"Failed to setup system tray icon: {str(e)}", log_type="both")
             # Fallback to normal window behavior
             self.master.protocol("WM_DELETE_WINDOW", self.master.destroy)
+            
+    def _run_tray_icon(self):
+        """Run the tray icon with error handling"""
+        try:
+            self.tray_icon.run()
+        except TypeError as e:
+            # Suppress the WPARAM error that can occur on Windows
+            if "WPARAM is simple" in str(e):
+                # Silently ignore this specific Windows-related error
+                pass
+            else:
+                print(f"Tray icon error: {str(e)}")
+        except Exception as e:
+            print(f"Tray icon error: {str(e)}")
 
     def show_window(self, icon=None, item=None):
         """Show the window from system tray"""
@@ -2976,7 +3000,14 @@ Licence: MIT"""
                 
             # Clean up tray icon if it exists
             if hasattr(self, 'tray_icon') and self.tray_icon is not None:
-                self.tray_icon.stop()
+                try:
+                    self.tray_icon.stop()
+                except TypeError as e:
+                    # Suppress WPARAM error on Windows
+                    if "WPARAM is simple" not in str(e):
+                        print(f"Error stopping tray icon: {str(e)}")
+                except Exception as e:
+                    print(f"Error stopping tray icon: {str(e)}")
                 
             # Save configuration before exit
             self.save_config()
