@@ -34,15 +34,28 @@ import ipaddress
 import random
 import uuid
 from math import log10
-from statistics import mean, median
+import pystray
+from PIL import Image
+import re
+from io import BytesIO
 import speedtest
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from win10toast import ToastNotifier
-import pystray
-from PIL import Image
-from io import BytesIO
-import re
+from statistics import mean, median
+
+# Try to import win10toast for notifications, but provide a fallback if unavailable
+NOTIFICATIONS_AVAILABLE = False
+try:
+    from win10toast import ToastNotifier
+    NOTIFICATIONS_AVAILABLE = True
+except ImportError:
+    # Create a dummy ToastNotifier class that does nothing
+    class ToastNotifier:
+        def __init__(self):
+            pass
+        
+        def show_toast(self, *args, **kwargs):
+            pass
 
 # Import tooltips
 try:
@@ -61,7 +74,7 @@ try:
 except ImportError:
     SPEEDTEST_AVAILABLE = False
 
-# Huawei LTE API integration - modern API access method
+# Try to import huawei_lte_api if available
 try:
     from huawei_lte_api.Client import Client
     from huawei_lte_api.AuthorizedConnection import AuthorizedConnection
@@ -1409,58 +1422,113 @@ class BandOptimiserApp(tk.Frame):
             self.master.after(0, lambda: self.connect_button.config(state=tk.NORMAL))
     
     def handle_connection_result(self, result, ip):
-        """Handle connection result"""
-        if result[0]:
-            # Store the session object
-            if isinstance(result[0], Client):
-                self.client = result[0]
-                self.session = None
-                self.log_message("Connected using Huawei LTE API", log_type="both")
-            else:
-                self.session = result[0]
-                self.token = result[1]
-                self.log_message("Connected using web interface", log_type="both")
+        """Handle the result from the connection thread"""
+        if isinstance(result, tuple):
+            # Process tuple format result (session/client, token)
+            success = bool(result[0])  # First element is session/client, which is truthy if connection succeeded
             
-            # Store credentials in config
-            self.config["router_ip"] = ip
-            self.config["username"] = self.username.get()
-            self.config["password"] = self.password.get()
-            self.config["auto_connect"] = self.auto_connect.get()
-            self.config["use_api_lib"] = self.use_api_lib.get()
-            self.config["speedtest_on_startup"] = self.run_speed_on_start.get()
-            save_config(self.config)
-            
-            # Update UI
-            self.is_connected = True
-            self.status_var.set("Connected")
-            self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
-            self.refresh_button.config(state=tk.NORMAL)
-            
-            # Set flag for initial connection notification
-            self.send_initial_notification = True
-            
-            # Scan for available bands
-            self.log_message("Scanning for available bands...", log_type="both")
-            try:
+            if success:
+                # Update connection status
+                self.is_connected = True
+                
+                # Determine if we're using API client or session
+                if HUAWEI_API_AVAILABLE and isinstance(result[0], Client):
+                    self.client = result[0]
+                    self.session = None
+                    self.token = None
+                    self.log_message("Connected using Huawei LTE API", log_type="both")
+                else:
+                    self.client = None
+                    self.session = result[0]
+                    self.token = result[1] if len(result) > 1 else None
+                    self.log_message("Connected using web interface", log_type="both")
+                
+                # Update status
+                self.status_var.set(f"Connected to {ip}")
+                self.log_message(f"Connected to router at {ip}", log_type="both")
+                
+                # Update connect button
+                self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
+                
+                # Get available bands
                 self.available_bands = scan_available_bands(self.client or self.session, ip, self.token)
                 self.log_message(f"Available 4G bands: {', '.join(self.available_bands['4G'])}", log_type="both")
                 self.log_message(f"Available 5G bands: {', '.join(self.available_bands['5G'])}", log_type="both")
                 
                 # Update band selection UI with available bands
                 self.update_band_selection_ui()
-            except Exception as e:
-                self.log_message(f"Error scanning bands: {str(e)}", log_type="both")
-            
-            # Refresh signal data
-            self.refresh_signal()
-            
-            # Run initial speedtest if enabled
-            if self.run_speed_on_start.get():
-                self._run_initial_speedtest()
+                
+                # Get initial signal information
+                self.refresh_signal()
+                
+                # Start auto-refresh if enabled
+                if self.auto_refresh.get():
+                    self.log_message("Starting auto-refresh polling", log_type="detailed")
+                    # Cancel any existing poll task first
+                    if hasattr(self, 'poll_status_task') and self.poll_status_task:
+                        self.master.after_cancel(self.poll_status_task)
+                    # Start a new polling task (30 seconds from now)
+                    self.poll_status_task = self.master.after(30000, self.poll_status)
+                
+                # Run initial speedtest if enabled
+                if self.run_speed_on_start.get():
+                    self._run_initial_speedtest()
+            else:
+                # Connection failed
+                error_msg = result[1] if len(result) > 1 else "Unknown error"
+                self.log_message(f"Connection failed: {error_msg}", log_type="both")
+                self.status_var.set("Connection failed")
+                self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
+        
+        elif isinstance(result, dict):
+            # Process dictionary format result
+            if result.get("status") == "success":
+                # Update connection status
+                self.is_connected = True
+                self.client = result.get("client")
+                self.session = result.get("session")
+                self.token = result.get("token")
+                
+                # Update status
+                self.status_var.set(f"Connected to {ip}")
+                self.log_message(f"Connected to router at {ip}", log_type="both")
+                
+                # Update connect button
+                self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
+                
+                # Get available bands
+                self.available_bands = scan_available_bands(self.client or self.session, ip, self.token)
+                self.log_message(f"Available 4G bands: {', '.join(self.available_bands['4G'])}", log_type="both")
+                self.log_message(f"Available 5G bands: {', '.join(self.available_bands['5G'])}", log_type="both")
+                
+                # Update band selection UI with available bands
+                self.update_band_selection_ui()
+                
+                # Get initial signal information
+                self.refresh_signal()
+                
+                # Start auto-refresh if enabled
+                if self.auto_refresh.get():
+                    self.log_message("Starting auto-refresh polling", log_type="detailed")
+                    # Cancel any existing poll task first
+                    if hasattr(self, 'poll_status_task') and self.poll_status_task:
+                        self.master.after_cancel(self.poll_status_task)
+                    # Start a new polling task (30 seconds from now)
+                    self.poll_status_task = self.master.after(30000, self.poll_status)
+                
+                # Run initial speedtest if enabled
+                if self.run_speed_on_start.get():
+                    self._run_initial_speedtest()
+            else:
+                # Connection failed
+                error_msg = result.get("error", "Unknown error")
+                self.log_message(f"Connection failed: {error_msg}", log_type="both")
+                self.status_var.set("Connection failed")
+                self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
+        
         else:
-            # Connection failed
-            error_msg = result[1] if len(result) > 1 else "Unknown error"
-            self.log_message(f"Connection failed: {error_msg}", log_type="both")
+            # Unknown result format
+            self.log_message(f"Connection failed: Unexpected result format", log_type="both")
             self.status_var.set("Connection failed")
             self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
     
@@ -1543,10 +1611,13 @@ class BandOptimiserApp(tk.Frame):
         # Disable refresh button while refreshing
         if hasattr(self, 'refresh_button'):
             self.refresh_button.config(state=tk.DISABLED)
+            
+            # Force re-enable after 3 seconds as a failsafe
+            self.master.after(3000, lambda: self.refresh_button.config(state=tk.NORMAL))
         
         # Run in background thread
         threading.Thread(target=self.refresh_thread, daemon=True).start()
-
+    
     def refresh_thread(self):
         """Background thread for refreshing signal data"""
         try:
@@ -1568,6 +1639,8 @@ class BandOptimiserApp(tk.Frame):
                 signal_data = fetch_signal_data(self, self.session, ip, token)
             else:
                 self.log_message("No active session or client available", log_type="both")
+                # Re-enable the refresh button
+                self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
                 return
             
             # Update UI with the signal data
@@ -1577,8 +1650,12 @@ class BandOptimiserApp(tk.Frame):
                 
                 # Check if the band has changed since the previous check
                 current_band = signal_data.get('band', 'N/A')
+                
+                # Don't report as a change if previous_band is None, "--", or "N/A" (initial connection)
+                is_first_check = (previous_band is None or previous_band == "--" or previous_band == "N/A")
+                
                 band_changed = (
-                    previous_band is not None and 
+                    not is_first_check and 
                     current_band is not None and 
                     current_band != 'N/A' and 
                     current_band != '--' and 
@@ -1591,6 +1668,7 @@ class BandOptimiserApp(tk.Frame):
                 # Show notification when first connected
                 if hasattr(self, 'send_initial_notification') and self.send_initial_notification:
                     show_notification = True
+                    is_first_check = True  # Mark as first check to avoid "band changed" message
                     self.send_initial_notification = False  # Reset the flag
                 
                 # Show notification if the band has changed
@@ -1600,39 +1678,46 @@ class BandOptimiserApp(tk.Frame):
                 
                 # Show notification if needed
                 if show_notification and current_band and current_band != 'N/A' and current_band != '--':
-                    try:
-                        toaster = ToastNotifier()
-                        
-                        # Get network technology information
-                        mode = signal_data.get('mode', '')
-                        network_type = "Unknown"
-                        
-                        # Determine network technology type
-                        if "LTE" in mode:
-                            if "LTE+" in mode or "LTE-A" in mode:
-                                network_type = "4G+"
-                            else:
-                                network_type = "4G"
-                        elif "NR" in mode or "5G" in mode:
-                            network_type = "5G"
+                    # Get network technology information
+                    mode = signal_data.get('mode', '')
+                    network_type = "Unknown"
+                    
+                    # Determine network technology type
+                    if "LTE" in mode:
+                        if "LTE+" in mode or "LTE-A" in mode:
+                            network_type = "4G+"
                         else:
-                            # If mode is a number, default to 4G
                             network_type = "4G"
-                        
-                        rsrp = signal_data.get('rsrp', 'N/A')
-                        
-                        notification_title = f"Huawei Band Scanner - {network_type}"
-                        notification_msg = f"Active band: {current_band}\nSignal: {rsrp}"
-                        
-                        toaster.show_toast(
-                            notification_title,
-                            notification_msg,
-                            icon_path=None,
-                            duration=5,
-                            threaded=True
-                        )
-                    except Exception as e:
-                        self.log_message(f"Failed to show connection notification: {str(e)}", log_type="detailed")
+                    elif "NR" in mode or "5G" in mode:
+                        network_type = "5G"
+                    else:
+                        # If mode is a number, default to 4G
+                        network_type = "4G"
+                    
+                    rsrp = signal_data.get('rsrp', 'N/A')
+                    
+                    notification_title = f"Huawei Band Scanner - {network_type}"
+                    notification_msg = f"Active band: {current_band}\nSignal: {rsrp}"
+                    
+                    # Different log message for initial connection vs band change
+                    if is_first_check:
+                        self.log_message(f"Connected to band: {current_band} ({network_type}) - Signal: {rsrp}", log_type="both")
+                    else:
+                        self.log_message(f"Band update: {notification_title} - {notification_msg}", log_type="both")
+                    
+                    # Only try to show toast notification if available
+                    if NOTIFICATIONS_AVAILABLE:
+                        try:
+                            toaster = ToastNotifier()
+                            toaster.show_toast(
+                                notification_title,
+                                notification_msg,
+                                icon_path=None,
+                                duration=5,
+                                threaded=True
+                            )
+                        except Exception as e:
+                            self.log_message(f"Failed to show notification: {str(e)}", log_type="detailed")
                 
                 # Update UI on main thread
                 self.master.after(0, lambda: self.update_signal_ui(signal_data))
@@ -1641,9 +1726,8 @@ class BandOptimiserApp(tk.Frame):
         except Exception as e:
             self.log_message(f"Error refreshing signal: {str(e)}", log_type="both")
         finally:
-            # Re-enable refresh button
-            if hasattr(self, 'refresh_button'):
-                self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
+            # Re-enable the refresh button when complete
+            self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
     
     def update_signal_ui(self, signal_data):
         # Define mapping between signal_data keys and display keys
@@ -2267,52 +2351,68 @@ Licence: MIT"""
         return None
 
     def toggle_auto_refresh(self):
-        """Toggle automatic signal refresh"""
-        # Toggle the auto-refresh setting
-        current_state = self.auto_refresh.get()
-        self.auto_refresh.set(not current_state)
+        """Handle auto-refresh state change"""
         new_state = self.auto_refresh.get()
         
-        # Cancel any existing poll task first
-        if hasattr(self, 'poll_status_task') and self.poll_status_task:
-            self.master.after_cancel(self.poll_status_task)
-            self.poll_status_task = None
-            self.log_message("Cancelled existing polling task", log_type="detailed")
-        
-        # If enabling auto-refresh
         if new_state:
             self.log_message("Auto-refresh enabled. Signal will update every 30 seconds.", log_type="both")
-            # Start the polling if we're connected
-            if hasattr(self, 'is_connected') and self.is_connected:
-                # Start a new polling task
-                self.poll_status()
-                self.log_message("Started polling task", log_type="detailed")
+            if self.is_connected:
+                try:
+                    self.refresh_signal()
+                    self.poll_status_task = self.master.after(30000, self.poll_status)
+                    self.log_message("Started polling task", log_type="detailed")
+                except Exception as e:
+                    self.log_message(f"Error starting auto-refresh: {str(e)}", log_type="both")
             else:
                 self.log_message("Auto-refresh will begin after connecting to router", log_type="both")
         else:
             self.log_message("Auto-refresh disabled.", log_type="both")
+            if hasattr(self, 'poll_status_task') and self.poll_status_task:
+                try:
+                    self.master.after_cancel(self.poll_status_task)
+                    self.poll_status_task = None
+                    self.log_message("Cancelled polling task", log_type="detailed")
+                except Exception as e:
+                    self.log_message(f"Error cancelling poll task: {str(e)}", log_type="detailed")
+        
+        # Save the configuration
+        try:
+            self.save_config()
+        except Exception as e:
+            self.log_message(f"Error saving config: {str(e)}", log_type="detailed")
     
     def poll_status(self):
         """Poll signal status at regular intervals"""
         try:
             # Check if we should still be polling
-            if not (hasattr(self, 'is_connected') and self.is_connected and self.auto_refresh.get()):
-                self.log_message("Polling stopped - disconnected or auto-refresh disabled", log_type="detailed")
+            if not self.is_connected:
+                self.log_message("Polling stopped - disconnected", log_type="detailed")
                 self.poll_status_task = None
                 return
                 
+            if not self.auto_refresh.get():
+                self.log_message("Polling stopped - auto-refresh disabled", log_type="detailed")
+                self.poll_status_task = None
+                return
+            
             # Refresh signal data
             self.refresh_signal()
             self.log_message("Auto-refreshed signal data", log_type="detailed")
             
-            # Schedule the next refresh
-            self.poll_status_task = self.master.after(30000, self.poll_status)
-            
         except Exception as e:
-            self.log_message(f"Error in polling task: {str(e)}", log_type="detailed")
-            # Try to reschedule even if there was an error
-            self.poll_status_task = self.master.after(30000, self.poll_status)
-
+            self.log_message(f"Error in polling task: {str(e)}", log_type="both")
+        finally:
+            # Always schedule the next refresh, regardless of current state
+            # This ensures continuous polling as long as auto-refresh is enabled
+            if self.is_connected and self.auto_refresh.get():
+                try:
+                    self.poll_status_task = self.master.after(30000, self.poll_status)
+                    self.log_message("Scheduled next poll", log_type="detailed")
+                except Exception as e:
+                    self.log_message(f"Error scheduling next poll: {str(e)}", log_type="detailed")
+            else:
+                self.poll_status_task = None
+    
     def check_band_lock(self):
         """Check if current band matches user selection and reapply if needed"""
         try:
