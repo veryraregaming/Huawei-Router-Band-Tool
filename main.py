@@ -14,6 +14,20 @@ import os
 from datetime import datetime
 import inspect
 import webbrowser
+import sys
+import ipaddress
+import random
+import uuid
+from math import log10
+from statistics import mean, median
+import speedtest
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from win10toast import ToastNotifier
+import pystray
+from PIL import Image
+from io import BytesIO
+import re
 
 # Import tooltips
 try:
@@ -496,7 +510,7 @@ def fetch_signal_data(self, session, ip, token):
                 if 'response' in status_data:
                     signal_data['mode'] = status_data['response'].get('CurrentNetworkTypeEx', 'LTE')
                     
-                    # Make the network type more user friendly
+                    # Make the network type more user-friendly
                     if signal_data['mode'] == '101':
                         signal_data['mode'] = '5G NSA'
                     elif signal_data['mode'] == '38':
@@ -829,20 +843,45 @@ class BandOptimiserApp(tk.Frame):
     def __init__(self, master=None):
         super().__init__(master)
         self.master = master
+        self.pack(fill=tk.BOTH, expand=True)
         
-        # Initialize important variables first to prevent attribute errors
-        self.band_vars = {}  # Dictionary for band selection checkboxes
-        self.config = {}     # Configuration dictionary
-        self.poll_status_task = None  # Task for auto-refresh
-        
-        # Set window properties
+        # Set window title and size
         self.master.title("Huawei CPE Pro 2 Band Scanner and Optimizer")
         self.master.geometry("800x600")
         self.master.minsize(800, 600)
         
+        # Create variables
+        self.router_ip = tk.StringVar(value="192.168.8.1")
+        self.username = tk.StringVar(value="admin")
+        self.password = tk.StringVar()
+        self.session = None
+        self.client = None  # For huawei-lte-api
+        self.token = None
+        self.is_connected = False
+        self.signal_info = {}
+        self.band_vars = {}  # Dictionary for band selection checkboxes
+        self.band_vars_4g = {}
+        self.band_vars_5g = {}
+        self.auto_refresh = tk.BooleanVar(value=False)
+        self.monitor_bands = tk.BooleanVar(value=False)
+        self.minimize_to_tray = tk.BooleanVar(value=False)  # Minimize to tray option
+        self.last_applied_bands = []
+        self.poll_status_task = None  # Task for auto-refresh
+        self.config = {}     # Configuration dictionary
+        self.tray_icon = None  # System tray icon
+        
+        # Initialize available bands with defaults
+        self.available_bands = {
+            "4G": SUPPORTED_4G_BANDS,
+            "5G": SUPPORTED_5G_BANDS
+        }
+        
+        # Set icon path
+        self.icon_path = "assets/icon.ico"
+        
         # Set icon
         try:
-            self.master.iconbitmap("assets/icon.ico")
+            self.master.iconbitmap(self.icon_path)
         except:
             pass
         
@@ -850,7 +889,7 @@ class BandOptimiserApp(tk.Frame):
         self.config = {}
         
         # Initialize variables
-        self.router_ip = tk.StringVar(value="192.168.1.1")
+        self.router_ip = tk.StringVar(value="192.168.8.1")
         self.username = tk.StringVar(value="admin")
         self.password = tk.StringVar(value="")
         self.token = None
@@ -896,24 +935,40 @@ class BandOptimiserApp(tk.Frame):
             self.upload_band_vars[band] = tk.BooleanVar()
             self.download_band_vars[band] = tk.BooleanVar()
         
-        # Store available bands - will be populated when connected
-        self.available_bands = {
-            "4G": SUPPORTED_4G_BANDS,
-            "5G": SUPPORTED_5G_BANDS
+        # Signal info variables
+        self.status_var = tk.StringVar(value="Not Connected")
+        
+        # Create dictionary for signal information display
+        self.signal_info = {
+            "RSRP": tk.StringVar(value="--"),
+            "RSRQ": tk.StringVar(value="--"),
+            "SINR": tk.StringVar(value="--"),
+            "BAND": tk.StringVar(value="--"),
+            "NETWORK_TYPE": tk.StringVar(value="--"),
+            "CARRIER": tk.StringVar(value="--"),
+            "DOWNLOAD": tk.StringVar(value="--"),
+            "UPLOAD": tk.StringVar(value="--")
         }
         
-        # Load saved configuration
-        self.load_config()
+        # Create log text widget for detailed status display
+        self.log_text = None
         
-        # Create the menu
+        # Initialize UI
         self.create_menu()
-        
-        # Create main frame
         self.create_main_frame()
+        
+        # Load config file if available
+        self.load_config()
         
         # Auto-connect if enabled
         if self.auto_connect.get():
-            self.master.after(1000, self.connect)
+            self.connect()
+            
+        # Initialize system tray
+        self.setup_tray_icon()
+        
+        # Log startup message
+        self.log_message("Application started", log_type="both")
 
     def load_config(self):
         """Load saved configuration"""
@@ -921,14 +976,17 @@ class BandOptimiserApp(tk.Frame):
             config = load_config()
             
             # Apply configuration to variables
-            self.router_ip.set(config.get("router_ip", "192.168.1.1"))
+            self.router_ip.set(config.get("router_ip", "192.168.8.1"))
             self.username.set(config.get("username", "admin"))
-            self.password.set(config.get("password", ""))
+            self.password.set(config.get("password", ""))  # Load the password directly
+            
+            # Load other settings
             self.auto_connect.set(config.get("auto_connect", False))
             self.use_api_lib.set(config.get("use_api_lib", True))
             self.run_speed_on_start.set(config.get("speedtest_on_startup", False))
             self.auto_refresh.set(config.get("auto_refresh", False))
             self.monitor_bands.set(config.get("monitor_bands", False))
+            self.minimize_to_tray.set(config.get("minimize_to_tray", False))
             
             # Load band selections
             selected_bands = config.get("selected_bands", [])
@@ -952,14 +1010,63 @@ class BandOptimiserApp(tk.Frame):
         file_menu.add_command(label="Connect", command=self.connect)
         file_menu.add_command(label="Disconnect", command=self.disconnect)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.master.quit)
+        file_menu.add_command(label="Exit", command=self.exit_app)  # Use exit_app instead of master.quit
         
         # Tools menu
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="Run Speedtest", command=self.start_speedtest)
         
+        # Options menu
+        options_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Options", menu=options_menu)
+        options_menu.add_checkbutton(label="Auto Refresh", variable=self.auto_refresh, 
+                                    command=self.toggle_auto_refresh)
+        options_menu.add_checkbutton(label="Monitor and Lock Bands", variable=self.monitor_bands,
+                                    command=self.save_config)
+        options_menu.add_checkbutton(label="Minimize to Tray on Close", variable=self.minimize_to_tray,
+                                   command=self.save_config)  # Ensure this saves config when changed
+        
         # Skip the Help menu entirely to avoid missing function references
+        
+        # Add auto-connect option
+        options_menu.add_checkbutton(
+            label="Auto-Connect at Startup", 
+            variable=self.auto_connect, 
+            command=self.save_config
+        )
+        
+        # Add API library option
+        options_menu.add_checkbutton(
+            label="Use Huawei LTE API Library", 
+            variable=self.use_api_lib, 
+            command=self.save_config
+        )
+        
+        # Add speedtest on startup option
+        options_menu.add_checkbutton(
+            label="Run Speedtest on Startup", 
+            variable=self.run_speed_on_start, 
+            command=self.save_config
+        )
+        
+        # Add optimise button
+        options_menu.add_command(
+            label="Optimise Bands", 
+            command=self.optimise
+        )
+        
+        # Add enhanced optimise button
+        options_menu.add_command(
+            label="Enhanced Optimise", 
+            command=self.enhanced_optimise
+        )
+        
+        # Add donate menu
+        options_menu.add_command(
+            label="Donate", 
+            command=self.show_donation_dialog
+        )
 
     def create_main_frame(self):
         # Create a frame for the main content
@@ -993,6 +1100,9 @@ class BandOptimiserApp(tk.Frame):
         
         speedtest_startup_cb = ttk.Checkbutton(options_frame, text="Run Speedtest on Startup", variable=self.run_speed_on_start)
         speedtest_startup_cb.pack(anchor=tk.W, pady=2)
+        
+        minimize_tray_cb = ttk.Checkbutton(options_frame, text="Minimize to Tray on Close", variable=self.minimize_to_tray)
+        minimize_tray_cb.pack(anchor=tk.W, pady=2)
         
         # Connect button
         self.connect_button = ttk.Button(conn_frame, text="Connect", command=self.connect)
@@ -1262,26 +1372,43 @@ class BandOptimiserApp(tk.Frame):
     
     def connect(self):
         """Connect to the router"""
+        # Don't connect if already connected
+        if self.is_connected:
+            self.log_message("Already connected", log_type="both")
+            return
+            
+        # Get connection details
         ip = self.router_ip.get()
         username = self.username.get()
         password = self.password.get()
-        use_api_lib = self.use_api_lib.get()
+        use_api = self.use_api_lib.get()
         
-        self.log_message(f"Connecting to {ip}...", log_type="both")
-        self.status_var.set("Connecting...")
-        
-        # Clear previous connection
-        if self.session or self.client:
-            self.disconnect()
-        
-        # Run connection in a background thread to keep UI responsive
-        def connect_thread():
-            result = login_to_router(ip, username, password, use_api_lib)
+        # Validate inputs
+        if not ip or not username or not password:
+            messagebox.showerror("Error", "Please enter router IP, username and password")
+            return
             
-            # Process results on the main thread
-            self.master.after(0, lambda: self.handle_connection_result(result, ip))
+        # Update UI
+        self.status_var.set("Connecting...")
+        self.log_message(f"Connecting to {ip}...", log_type="both")
         
-        threading.Thread(target=connect_thread, daemon=True).start()
+        # Start connection thread
+        self.connect_button.config(state=tk.DISABLED)
+        threading.Thread(target=lambda: self.connect_thread(ip, username, password, use_api)).start()
+    
+    def connect_thread(self, ip, username, password, use_api):
+        """Background thread for connecting to router"""
+        try:
+            # Connect to router
+            result = login_to_router(ip, username, password, use_api)
+            
+            # Process connection result on main thread
+            self.master.after(0, lambda: self.handle_connection_result(result, ip))
+        except Exception as e:
+            # Log error and update UI on main thread
+            self.master.after(0, lambda: self.log_message(f"Connection error: {str(e)}", log_type="both"))
+            self.master.after(0, lambda: self.status_var.set("Connection failed"))
+            self.master.after(0, lambda: self.connect_button.config(state=tk.NORMAL))
     
     def handle_connection_result(self, result, ip):
         """Handle connection result"""
@@ -1308,7 +1435,11 @@ class BandOptimiserApp(tk.Frame):
             # Update UI
             self.is_connected = True
             self.status_var.set("Connected")
-            self.connect_button.config(text="Disconnect")
+            self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
+            self.refresh_button.config(state=tk.NORMAL)
+            
+            # Set flag for initial connection notification
+            self.send_initial_notification = True
             
             # Scan for available bands
             self.log_message("Scanning for available bands...", log_type="both")
@@ -1330,10 +1461,10 @@ class BandOptimiserApp(tk.Frame):
                 self._run_initial_speedtest()
         else:
             # Connection failed
-            self.is_connected = False
-            self.status_var.set("Not Connected")
-            messagebox.showerror("Connection Failed", result[2])
-            self.log_message(f"Connection failed: {result[2]}", log_type="both")
+            error_msg = result[1] if len(result) > 1 else "Unknown error"
+            self.log_message(f"Connection failed: {error_msg}", log_type="both")
+            self.status_var.set("Connection failed")
+            self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
     
     def _run_initial_speedtest(self):
         """Run initial speed test after connection"""
@@ -1389,24 +1520,26 @@ class BandOptimiserApp(tk.Frame):
     
     def disconnect(self):
         """Disconnect from the router"""
-        # Cancel any pending auto-refresh
-        if self.poll_status_task:
-            self.master.after_cancel(self.poll_status_task)
-            self.poll_status_task = None
-        
-        # Reset session
-        self.session = None
-        self.client = None
-        self.token = None
+        if not self.is_connected:
+            return
+            
+        # Reset state
         self.is_connected = False
+        self.client = None
+        self.session = None
+        self.token = None
         
         # Update UI
-        self.log_message("Disconnected from router", log_type="both")
         self.status_var.set("Disconnected")
+        self.connect_button.config(text="Connect", command=self.connect)
+        self.refresh_button.config(state=tk.DISABLED)
         
-        # Reset signal info
-        for key in self.signal_info:
-            self.signal_info[key].set("--")
+        # Stop auto-refresh if enabled
+        if self.auto_refresh.get():
+            self.toggle_auto_refresh()
+        
+        # Log message
+        self.log_message("Disconnected from router", log_type="both")
     
     def refresh_signal(self):
         # Disable refresh button while refreshing
@@ -1418,28 +1551,18 @@ class BandOptimiserApp(tk.Frame):
         refresh_thread_obj.start()
 
     def refresh_thread(self):
-        """Use the unified fetch_signal_data function to update signal information"""
+        """Background thread for refreshing signal data"""
         try:
-            # Check if we're connected
-            if not hasattr(self, 'is_connected') or not self.is_connected:
-                self.log_message("Not connected to router", log_type="both")
-                return
-
-            # Get IP address
+            # Get router IP
             ip = self.router_ip.get()
-            if not ip:
-                self.log_message("Router IP not specified", log_type="both")
-                return
-                
-            # Check session or client availability
-            use_api = hasattr(self, 'use_api_lib') and self.use_api_lib.get() and hasattr(self, 'client') and self.client
+            token = self.token
             
-            if use_api:
-                # Use API client
-                signal_data = fetch_signal_data(self, self.client, ip, self.token if hasattr(self, 'token') else None)
-            elif hasattr(self, 'session') and self.session:
-                # Use session
-                token = self.token if hasattr(self, 'token') else None
+            # Fetch the signal data using the appropriate method
+            if self.client is not None:
+                # Using the API library
+                signal_data = fetch_signal_data_api(self, self.client, ip)
+            elif self.session is not None:
+                # Using web requests
                 signal_data = fetch_signal_data(self, self.session, ip, token)
             else:
                 self.log_message("No active session or client available", log_type="both")
@@ -1450,15 +1573,49 @@ class BandOptimiserApp(tk.Frame):
                 # Log the data for debugging
                 self.log_message(f"Signal data received: {signal_data}", log_type="detailed")
                 
+                # Send notification with current band if it exists and we're refreshing after initial connection
+                if 'band' in signal_data and hasattr(self, 'send_initial_notification') and self.send_initial_notification:
+                    self.send_initial_notification = False
+                    try:
+                        toaster = ToastNotifier()
+                        
+                        # Get network technology information
+                        mode = signal_data.get('mode', '')
+                        network_type = "Unknown"
+                        
+                        # Determine network technology type
+                        if "LTE" in mode:
+                            if "LTE+" in mode or "LTE-A" in mode:
+                                network_type = "4G+"
+                            else:
+                                network_type = "4G"
+                        elif "NR" in mode or "5G" in mode:
+                            network_type = "5G"
+                        else:
+                            # If mode is a number, default to 4G
+                            network_type = "4G"
+                        
+                        rsrp = signal_data.get('rsrp', 'N/A')
+                        
+                        notification_title = f"Huawei Band Scanner - {network_type}"
+                        notification_msg = f"Connected on band {signal_data['band']}\nSignal: {rsrp}"
+                        
+                        toaster.show_toast(
+                            notification_title,
+                            notification_msg,
+                            icon_path=None,
+                            duration=5,
+                            threaded=True
+                        )
+                    except Exception as e:
+                        self.log_message(f"Failed to show connection notification: {str(e)}", log_type="detailed")
+                
                 # Update UI on main thread
                 self.master.after(0, lambda: self.update_signal_ui(signal_data))
             else:
                 self.log_message("Failed to fetch signal data", log_type="both")
         except Exception as e:
             self.log_message(f"Error refreshing signal: {str(e)}", log_type="both")
-        finally:
-            # Re-enable refresh button on main thread
-            self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
     
     def update_signal_ui(self, signal_data):
         # Define mapping between signal_data keys and display keys
@@ -1986,13 +2143,7 @@ Licence: MIT"""
             band_buttons_4g = ttk.Frame(self.band_section_4g)
             band_buttons_4g.grid(row=row+1, column=0, columnspan=4, pady=5)
             
-            ttk.Button(band_buttons_4g, text="Select All 4G", 
-                      command=lambda: self.toggle_all_bands(True, '4G'),
-                      width=12).pack(side=tk.LEFT, padx=2)
-                      
-            ttk.Button(band_buttons_4g, text="Clear All 4G", 
-                      command=lambda: self.toggle_all_bands(False, '4G'),
-                      width=12).pack(side=tk.LEFT, padx=2)
+            # Buttons removed as requested
             
             # Update 5G bands tab
             # First, clear all existing widgets from the section
@@ -2027,13 +2178,7 @@ Licence: MIT"""
             band_buttons_5g = ttk.Frame(self.band_section_5g)
             band_buttons_5g.grid(row=row+1, column=0, columnspan=4, pady=5)
             
-            ttk.Button(band_buttons_5g, text="Select All 5G", 
-                      command=lambda: self.toggle_all_bands(True, '5G'),
-                      width=12).pack(side=tk.LEFT, padx=2)
-                      
-            ttk.Button(band_buttons_5g, text="Clear All 5G", 
-                      command=lambda: self.toggle_all_bands(False, '5G'),
-                      width=12).pack(side=tk.LEFT, padx=2)
+            # Buttons removed as requested
             
             self.log_message("Band selection updated with available bands", log_type="both")
         else:
@@ -2059,7 +2204,7 @@ Licence: MIT"""
             self.log_message("Auto-refresh disabled.", log_type="both")
             # Cancel polling task if it exists
             if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                self.root.after_cancel(self.poll_status_task)
+                self.master.after_cancel(self.poll_status_task)
                 self.poll_status_task = None
 
     def poll_status(self):
@@ -2074,7 +2219,7 @@ Licence: MIT"""
         
         # Schedule next update if auto-refresh is still enabled
         if hasattr(self, 'auto_refresh') and self.auto_refresh.get():
-            self.poll_status_task = self.root.after(30000, self.poll_status)  # 30 seconds
+            self.poll_status_task = self.master.after(60000, self.poll_status)  # Check every 60 seconds
 
     def check_band_lock(self):
         """Check if current band matches user selection and reapply if needed"""
@@ -2119,8 +2264,22 @@ Licence: MIT"""
                 band_mismatch = True
                 
             if band_mismatch:
-                self.log_message(f"⚠️ Band lock changed: Router using {current_band} instead of {', '.join(selected_band_names)}", log_type="both")
+                message = f"Band lock changed: Router using {current_band} instead of {', '.join(selected_band_names)}"
+                self.log_message(f"⚠️ {message}", log_type="both")
                 self.log_message("🔄 Reapplying band lock...", log_type="both")
+                
+                # Show windows notification
+                try:
+                    toaster = ToastNotifier()
+                    toaster.show_toast(
+                        "Huawei Band Scanner",
+                        message,
+                        icon_path=None,
+                        duration=5,
+                        threaded=True
+                    )
+                except Exception as e:
+                    self.log_message(f"Failed to show notification: {str(e)}", log_type="detailed")
                 
                 # Run in background thread to reapply bands
                 def reapply_thread():
@@ -2132,10 +2291,23 @@ Licence: MIT"""
                     )
                     
                     if success:
-                        self.root.after(0, lambda: self.log_message("✅ Band lock reapplied successfully", log_type="both"))
-                        self.root.after(5000, self.refresh_signal)
+                        self.master.after(0, lambda: self.log_message("✅ Band lock reapplied successfully", log_type="both"))
+                        self.master.after(5000, self.refresh_signal)
+                        
+                        # Show success notification
+                        try:
+                            toaster = ToastNotifier()
+                            toaster.show_toast(
+                                "Huawei Band Scanner",
+                                "Band lock successfully reapplied",
+                                icon_path=None,
+                                duration=3,
+                                threaded=True
+                            )
+                        except Exception as e:
+                            pass  # Silently ignore notification errors
                     else:
-                        self.root.after(0, lambda: self.log_message("❌ Failed to reapply band lock", log_type="both"))
+                        self.master.after(0, lambda: self.log_message("❌ Failed to reapply band lock", log_type="both"))
                 
                 threading.Thread(target=reapply_thread, daemon=True).start()
         except Exception as e:
@@ -2164,6 +2336,9 @@ Licence: MIT"""
                 self.apply_bands_button.config(state=tk.NORMAL)
             return
         
+        # Store the selected bands for monitoring
+        self.last_applied_bands = selected_bands.copy()
+        
         band_list = ", ".join(selected_bands)
         self.log_message(f"Applying band selection: {band_list}...", log_type="both")
         
@@ -2173,14 +2348,14 @@ Licence: MIT"""
                 success = apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, selected_bands)
                 
                 if success:
-                    self.root.after(0, lambda: self.log_message("Band selection applied successfully. Changes may take up to 30 seconds to take effect.", log_type="both"))
-                    self.root.after(5000, self.refresh_signal)  # Refresh after a delay
+                    self.master.after(0, lambda: self.log_message("Band selection applied successfully. Changes may take up to 30 seconds to take effect.", log_type="both"))
+                    self.master.after(5000, self.refresh_signal)  # Refresh after a delay
                 else:
-                    self.root.after(0, lambda: self.log_message("Failed to apply band selection. Check connection.", log_type="both"))
+                    self.master.after(0, lambda: self.log_message("Failed to apply band selection. Check connection.", log_type="both"))
             finally:
                 # Re-enable button when done
                 if hasattr(self, 'apply_bands_button'):
-                    self.root.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
+                    self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
         
         threading.Thread(target=apply_thread, daemon=True).start()
 
@@ -2670,6 +2845,149 @@ Licence: MIT"""
                     self.apply_band_selection(original_band_config)
             except Exception as restore_error:
                 self.log_message(f"Failed to restore original bands: {str(restore_error)}", log_type="both")
+
+    def apply_thread(self):
+        try:
+            # Collect selected bands
+            selected_bands = {
+                "4G": [band for band, var in self.band_vars_4g.items() if var.get()],
+                "5G": [band for band, var in self.band_vars_5g.items() if var.get()]
+            }
+            
+            # Add required verification
+            if len(selected_bands["4G"]) == 0 and len(selected_bands["5G"]) == 0:
+                self.master.after(0, lambda: self.log_message("Please select at least one band", log_type="error"))
+                self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
+                return
+            
+            bands_list = selected_bands["4G"] + selected_bands["5G"]
+            # Log the bands being applied
+            bands_str = ", ".join(bands_list)
+            self.master.after(0, lambda: self.log_message(f"Applying band selection: {bands_str}...", log_type="both"))
+            
+            # Apply band lock
+            apply_band_lock(self.session, self.router_ip, self.token, selected_bands)
+            
+            # Update UI on success
+            self.master.after(0, lambda: self.log_message("Band selection applied successfully. Changes may take up to 30 seconds to take effect.", log_type="both"))
+            self.master.after(3000, self.refresh_signal)  # Refresh signal after 3 seconds
+        except Exception as e:
+            # Log error and re-enable button
+            err_msg = f"Failed to apply band selection: {str(e)}"
+            print(err_msg)
+            self.master.after(0, lambda: self.log_message(err_msg, log_type="error"))
+        finally:
+            # Re-enable the apply button
+            self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
+
+    def save_config(self):
+        """Save configuration to file"""
+        # Get current configuration
+        config = {
+            "router_ip": self.router_ip.get(),
+            "username": self.username.get(),
+            "password": self.password.get(),  # Save password as-is
+            "auto_refresh": self.auto_refresh.get(),
+            "monitor_bands": self.monitor_bands.get(),
+            "minimize_to_tray": self.minimize_to_tray.get()
+        }
+        
+        # Save to file
+        try:
+            with open("config.json", "w") as f:
+                json.dump(config, f)
+            self.log_message("Configuration saved", log_type="detailed")
+        except Exception as e:
+            self.log_message(f"Failed to save configuration: {str(e)}", log_type="detailed")
+
+    def setup_tray_icon(self):
+        """Setup system tray icon and menu"""
+        # Check if we already have a tray icon
+        if self.tray_icon is not None:
+            return
+            
+        try:
+            # Create system tray icon
+            if os.path.exists(self.icon_path):
+                icon_image = Image.open(self.icon_path)
+            else:
+                # Create a simple icon if the icon file doesn't exist
+                icon_image = Image.new('RGBA', (64, 64), color=(0, 120, 212, 255))
+                
+            # Create tray icon menu
+            menu = (
+                pystray.MenuItem('Show', self.show_window),
+                pystray.MenuItem('Exit', self.exit_app)
+            )
+            
+            # Create tray icon
+            self.tray_icon = pystray.Icon("Huawei Band Scanner", icon_image, "Huawei Band Scanner", menu)
+            
+            # Start tray icon in a separate thread
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            
+            # Bind window close event
+            self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+            
+            self.log_message("System tray icon setup completed", log_type="detailed")
+        except Exception as e:
+            self.log_message(f"Failed to setup system tray icon: {str(e)}", log_type="both")
+            # Fallback to normal window behavior
+            self.master.protocol("WM_DELETE_WINDOW", self.master.destroy)
+
+    def show_window(self, icon=None, item=None):
+        """Show the window from system tray"""
+        self.master.deiconify()
+        self.master.lift()
+        self.master.focus_force()
+
+    def hide_window(self):
+        """Hide the window to system tray"""
+        self.master.withdraw()
+        
+        # Show notification that app is still running
+        try:
+            toaster = ToastNotifier()
+            toaster.show_toast(
+                "Huawei Band Scanner",
+                "Application is still running in the system tray",
+                icon_path=None,
+                duration=3,
+                threaded=True
+            )
+        except Exception:
+            pass
+
+    def on_close(self):
+        """Handle window close event"""
+        if self.minimize_to_tray.get():
+            # Hide to system tray
+            self.hide_window()
+        else:
+            # Exit application
+            self.exit_app()
+
+    def exit_app(self, icon=None, item=None):
+        """Properly exit the application, cleaning up resources"""
+        try:
+            # Stop any auto-refresh
+            if hasattr(self, 'auto_refresh') and self.auto_refresh.get():
+                self.toggle_auto_refresh()
+                
+            # Clean up tray icon if it exists
+            if hasattr(self, 'tray_icon') and self.tray_icon is not None:
+                self.tray_icon.stop()
+                
+            # Save configuration before exit
+            self.save_config()
+            
+            # Exit the application
+            self.master.destroy()
+        except Exception as e:
+            print(f"Error exiting: {str(e)}")
+            # Force exit if cleanup fails
+            import sys
+            sys.exit(0)
 
 # Add a new function for scanning available bands - around line 700-800
 def scan_available_bands(session, ip, token):
