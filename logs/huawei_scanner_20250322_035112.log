@@ -1,0 +1,243 @@
+===== Session started at 03:51:12 =====
+[03:51:12] Application started
+[03:51:12] Connect to your Huawei router to begin
+[03:51:12] Processed 4G bands: B1, B3, B7, B8, B20, B28, B32, B38, B40, B41, B42
+[03:51:12] Processed 5G bands: n1, n3, n28, n41, n78, n79
+[03:51:12] Band selection updated with available bands
+[03:51:12] Configuration loaded
+[03:51:12] System tray icon setup completed
+[03:51:15] Connecting to router at 192.168.1.1...
+[03:51:17] Connected using Huawei LTE API (client initialized: True)
+[03:51:17] Refreshing signal data...
+[03:51:17] Attempting to fetch signal data with current session
+[03:51:17] Auto-refreshed signal data
+[03:51:17] Scheduled next poll in 30.0 seconds
+[03:51:17] Auto-refresh enabled. Signal will update every 30 seconds.
+[03:51:17] Refresh already in progress - skipping
+[03:51:17] Processed 4G bands: B1, B3, B7, B8, B20, B28, B32, B38, B40, B41, B42
+[03:51:17] Processed 5G bands: n1, n3, n28, n41, n78, n79
+[03:51:17] Band selection updated with available bands
+[03:51:17] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:51:17] LTE band hex: C5
+[03:51:17] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035117.json
+[03:51:17] Raw download rate: 1280735.0 bytes/s
+[03:51:17] Raw upload rate: 2318006.0 bytes/s
+[03:51:17] Current download rate: 10.25 Mbps (not displayed in UI)
+[03:51:17] Current upload rate: 18.54 Mbps (not displayed in UI)
+[03:51:17] API signal data: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:17] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035117.json
+[03:51:17] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:17] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:51:17] Checking for band: B1
+[03:51:17] Selected active band: B1
+[03:51:17] Checking for band: B3
+[03:51:17] Selected active band: B3
+[03:51:17] Checking for band: B7
+[03:51:17] Selected active band: B7
+[03:51:17] Checking for band: B8
+[03:51:17] Selected active band: B8
+[03:51:37] Refreshing signal data...
+[03:51:37] Attempting to fetch signal data with current session
+[03:51:37] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:51:37] LTE band hex: C5
+[03:51:37] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035137.json
+[03:51:37] Raw download rate: 1337817.0 bytes/s
+[03:51:37] Raw upload rate: 2364552.0 bytes/s
+[03:51:37] Current download rate: 10.70 Mbps (not displayed in UI)
+[03:51:37] Current upload rate: 18.92 Mbps (not displayed in UI)
+[03:51:37] API signal data: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:37] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035137.json
+[03:51:37] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:37] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:51:37] Checking for band: B1
+[03:51:37] Selected active band: B1
+[03:51:37] Checking for band: B3
+[03:51:37] Selected active band: B3
+[03:51:37] Checking for band: B7
+[03:51:37] Selected active band: B7
+[03:51:37] Checking for band: B8
+[03:51:37] Selected active band: B8
+[03:51:39] Refreshing signal data...
+[03:51:39] Attempting to fetch signal data with current session
+[03:51:39] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:51:39] LTE band hex: C5
+[03:51:39] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035139.json
+[03:51:39] Raw download rate: 1412211.0 bytes/s
+[03:51:39] Raw upload rate: 1855637.0 bytes/s
+[03:51:39] Current download rate: 11.30 Mbps (not displayed in UI)
+[03:51:39] Current upload rate: 14.85 Mbps (not displayed in UI)
+[03:51:39] API signal data: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:39] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035139.json
+[03:51:39] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:39] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:51:39] Checking for band: B1
+[03:51:39] Selected active band: B1
+[03:51:39] Checking for band: B3
+[03:51:39] Selected active band: B3
+[03:51:39] Checking for band: B7
+[03:51:39] Selected active band: B7
+[03:51:39] Checking for band: B8
+[03:51:39] Selected active band: B8
+[03:51:47] Refreshing signal data...
+[03:51:47] Attempting to fetch signal data with current session
+[03:51:47] Auto-refreshed signal data
+[03:51:47] Scheduled next poll in 30.0 seconds
+[03:51:47] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:51:47] LTE band hex: C5
+[03:51:47] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035147.json
+[03:51:47] Raw download rate: 1268766.0 bytes/s
+[03:51:47] Raw upload rate: 2557200.0 bytes/s
+[03:51:47] Current download rate: 10.15 Mbps (not displayed in UI)
+[03:51:47] Current upload rate: 20.46 Mbps (not displayed in UI)
+[03:51:47] API signal data: {'rsrp': '-85dBm', 'rsrq': '-5.0dB', 'sinr': '14dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:47] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035147.json
+[03:51:47] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-5.0dB', 'sinr': '14dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:51:47] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:51:47] Checking for band: B1
+[03:51:47] Selected active band: B1
+[03:51:47] Checking for band: B3
+[03:51:47] Selected active band: B3
+[03:51:47] Checking for band: B7
+[03:51:47] Selected active band: B7
+[03:51:47] Checking for band: B8
+[03:51:47] Selected active band: B8
+[03:52:17] Refreshing signal data...
+[03:52:17] Attempting to fetch signal data with current session
+[03:52:17] Auto-refreshed signal data
+[03:52:17] Scheduled next poll in 30.0 seconds
+[03:52:17] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:52:17] LTE band hex: C5
+[03:52:17] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035217.json
+[03:52:17] Raw download rate: 1026353.0 bytes/s
+[03:52:17] Raw upload rate: 1991462.0 bytes/s
+[03:52:17] Current download rate: 8.21 Mbps (not displayed in UI)
+[03:52:17] Current upload rate: 15.93 Mbps (not displayed in UI)
+[03:52:17] API signal data: {'rsrp': '-84dBm', 'rsrq': '-5.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:52:17] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035217.json
+[03:52:17] Raw signal data received: {'rsrp': '-84dBm', 'rsrq': '-5.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:52:17] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:52:17] Checking for band: B1
+[03:52:17] Selected active band: B1
+[03:52:17] Checking for band: B3
+[03:52:17] Selected active band: B3
+[03:52:17] Checking for band: B7
+[03:52:17] Selected active band: B7
+[03:52:17] Checking for band: B8
+[03:52:17] Selected active band: B8
+[03:52:47] Refreshing signal data...
+[03:52:47] Attempting to fetch signal data with current session
+[03:52:47] Auto-refreshed signal data
+[03:52:47] Scheduled next poll in 30.0 seconds
+[03:52:47] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:52:47] LTE band hex: C5
+[03:52:47] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035247.json
+[03:52:47] Raw download rate: 1135703.0 bytes/s
+[03:52:47] Raw upload rate: 2501701.0 bytes/s
+[03:52:47] Current download rate: 9.09 Mbps (not displayed in UI)
+[03:52:47] Current upload rate: 20.01 Mbps (not displayed in UI)
+[03:52:47] API signal data: {'rsrp': '-85dBm', 'rsrq': '-8.0dB', 'sinr': '15dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:52:47] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035247.json
+[03:52:47] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-8.0dB', 'sinr': '15dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:52:47] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:52:47] Checking for band: B1
+[03:52:47] Selected active band: B1
+[03:52:47] Checking for band: B3
+[03:52:47] Selected active band: B3
+[03:52:47] Checking for band: B7
+[03:52:47] Selected active band: B7
+[03:52:47] Checking for band: B8
+[03:52:47] Selected active band: B8
+[03:53:17] Sending session keepalive request
+[03:53:17] Keepalive successful (API) - Device: Unknown
+[03:53:17] Refreshing signal data...
+[03:53:17] Attempting to fetch signal data with current session
+[03:53:17] Auto-refreshed signal data
+[03:53:17] Scheduled next poll in 30.0 seconds
+[03:53:17] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:53:17] LTE band hex: C5
+[03:53:17] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035317.json
+[03:53:17] Raw download rate: 1233592.0 bytes/s
+[03:53:17] Raw upload rate: 2647614.0 bytes/s
+[03:53:17] Current download rate: 9.87 Mbps (not displayed in UI)
+[03:53:17] Current upload rate: 21.18 Mbps (not displayed in UI)
+[03:53:17] API signal data: {'rsrp': '-85dBm', 'rsrq': '-6.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:53:17] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035317.json
+[03:53:17] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-6.0dB', 'sinr': '16dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:53:17] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:53:17] Checking for band: B1
+[03:53:17] Selected active band: B1
+[03:53:17] Checking for band: B3
+[03:53:17] Selected active band: B3
+[03:53:17] Checking for band: B7
+[03:53:17] Selected active band: B7
+[03:53:17] Checking for band: B8
+[03:53:17] Selected active band: B8
+[03:53:47] Refreshing signal data...
+[03:53:47] Attempting to fetch signal data with current session
+[03:53:47] Auto-refreshed signal data
+[03:53:47] Scheduled next poll in 30.0 seconds
+[03:53:47] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:53:47] LTE band hex: C5
+[03:53:47] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035347.json
+[03:53:47] Raw download rate: 1618367.0 bytes/s
+[03:53:47] Raw upload rate: 2349244.0 bytes/s
+[03:53:47] Current download rate: 12.95 Mbps (not displayed in UI)
+[03:53:47] Current upload rate: 18.79 Mbps (not displayed in UI)
+[03:53:47] API signal data: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '15dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:53:47] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035347.json
+[03:53:47] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-4.0dB', 'sinr': '15dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:53:47] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:53:47] Checking for band: B1
+[03:53:47] Selected active band: B1
+[03:53:47] Checking for band: B3
+[03:53:47] Selected active band: B3
+[03:53:47] Checking for band: B7
+[03:53:47] Selected active band: B7
+[03:53:47] Checking for band: B8
+[03:53:47] Selected active band: B8
+[03:54:17] Refreshing signal data...
+[03:54:17] Attempting to fetch signal data with current session
+[03:54:17] Auto-refreshed signal data
+[03:54:17] Scheduled next poll in 30.0 seconds
+[03:54:17] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:54:17] LTE band hex: C5
+[03:54:17] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035417.json
+[03:54:17] Raw download rate: 1294679.0 bytes/s
+[03:54:17] Raw upload rate: 2288601.0 bytes/s
+[03:54:17] Current download rate: 10.36 Mbps (not displayed in UI)
+[03:54:17] Current upload rate: 18.31 Mbps (not displayed in UI)
+[03:54:17] API signal data: {'rsrp': '-85dBm', 'rsrq': '-6.0dB', 'sinr': '14dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:54:17] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035417.json
+[03:54:17] Raw signal data received: {'rsrp': '-85dBm', 'rsrq': '-6.0dB', 'sinr': '14dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:54:17] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:54:17] Checking for band: B1
+[03:54:17] Selected active band: B1
+[03:54:17] Checking for band: B3
+[03:54:17] Selected active band: B3
+[03:54:17] Checking for band: B7
+[03:54:17] Selected active band: B7
+[03:54:17] Checking for band: B8
+[03:54:17] Selected active band: B8
+[03:54:47] Refreshing signal data...
+[03:54:47] Attempting to fetch signal data with current session
+[03:54:47] Auto-refreshed signal data
+[03:54:47] Scheduled next poll in 30.0 seconds
+[03:54:47] Net mode info: {'NetworkMode': '03', 'NetworkBand': '0', 'LTEBand': 'C5'}
+[03:54:47] LTE band hex: C5
+[03:54:47] Saved raw traffic stats to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\raw_traffic_stats_20250322_035447.json
+[03:54:47] Raw download rate: 1063790.0 bytes/s
+[03:54:47] Raw upload rate: 1970477.0 bytes/s
+[03:54:47] Current download rate: 8.51 Mbps (not displayed in UI)
+[03:54:47] Current upload rate: 15.76 Mbps (not displayed in UI)
+[03:54:47] API signal data: {'rsrp': '-84dBm', 'rsrq': '-5.0dB', 'sinr': '8dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:54:47] Saved processed signal data to c:\Users\Rare\Starshopping.dev\Dev\Huawei CPE Pro 2 Band Scanner\debug\processed_signal_data_20250322_035447.json
+[03:54:47] Raw signal data received: {'rsrp': '-84dBm', 'rsrq': '-5.0dB', 'sinr': '8dB', 'bands': 'B1, B3, B7, B8', 'band': 'B1', 'primary_band': 'B1'}
+[03:54:47] Selecting multiple active bands: ['B1', 'B3', 'B7', 'B8']
+[03:54:47] Checking for band: B1
+[03:54:47] Selected active band: B1
+[03:54:47] Checking for band: B3
+[03:54:47] Selected active band: B3
+[03:54:47] Checking for band: B7
+[03:54:47] Selected active band: B7
+[03:54:47] Checking for band: B8
+[03:54:47] Selected active band: B8

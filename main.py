@@ -3012,26 +3012,95 @@ class BandOptimiserApp(tk.Frame):
             # Test each band one by one - use available bands
             self.log_message("🔄 Testing 4G bands...", log_type="both")
             for band in self.available_bands["4G"]:
-                try:
-                    # Apply single band
-                    self.log_message(f"Testing band {band}...", log_type="both")
-                    apply_band_lock(
-                        self.session or self.client,
-                        self.router_ip.get(),
-                        self.token,
-                        [band]
-                    )
+                retry_count = 0
+                max_retries = 2
+                success = False
+                
+                while not success and retry_count <= max_retries:
+                    try:
+                        # Apply single band
+                        self.log_message(f"Testing band {band}...", log_type="both")
+                        apply_band_lock(
+                            self.session or self.client,
+                            self.router_ip.get(),
+                            self.token,
+                            [band]
+                        )
+                        success = True
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        # Check for session token errors
+                        if ("wrong session token" in error_str or 
+                            "125003" in error_str or 
+                            "100003" in error_str or 
+                            "needs login" in error_str or
+                            "no rights" in error_str) and retry_count < max_retries:
+                            # Session expired during band application, attempt reconnection
+                            retry_count += 1
+                            self.log_message(f"Session token error while applying band {band}. Reconnecting... (Attempt {retry_count})", log_type="both")
+                            
+                            # Reconnect using stored credentials
+                            reconnect_success = self.silent_reconnect(
+                                self.router_ip.get(),
+                                self.username.get(),
+                                self.password.get(),
+                                self.use_api_lib.get()
+                            )
+                            
+                            if reconnect_success:
+                                self.log_message("Reconnected successfully, retrying band application", log_type="both")
+                                time.sleep(2)  # Small delay before retry
+                            else:
+                                raise Exception(f"Failed to reconnect after session token error")
+                        else:
+                            # Other error, not retry-able
+                            raise e
+                
+                    if not success:
+                        self.log_message(f"Failed to apply band {band} after {max_retries} attempts, skipping", log_type="both")
+                        continue
                     
                     # Wait for band to stabilize - increased to 10 seconds for better stability
                     time.sleep(10)
                     
-                    # Get signal metrics
-                    signal_data = fetch_signal_data(
-                        self,
-                        self.session or self.client,
-                        self.router_ip.get(),
-                        self.token
-                    )
+                    # Get signal metrics - with retry for session errors
+                    retry_count = 0
+                    signal_data = None
+                    
+                    while signal_data is None and retry_count <= max_retries:
+                        try:
+                            signal_data = fetch_signal_data(
+                                self,
+                                self.session or self.client,
+                                self.router_ip.get(),
+                                self.token
+                            )
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if ("wrong session token" in error_str or 
+                                "125003" in error_str or 
+                                "100003" in error_str or 
+                                "needs login" in error_str or
+                                "no rights" in error_str) and retry_count < max_retries:
+                                
+                                retry_count += 1
+                                self.log_message(f"Session token error while fetching signal data. Reconnecting... (Attempt {retry_count})", log_type="both")
+                                
+                                # Reconnect using stored credentials
+                                reconnect_success = self.silent_reconnect(
+                                    self.router_ip.get(),
+                                    self.username.get(),
+                                    self.password.get(),
+                                    self.use_api_lib.get()
+                                )
+                                
+                                if reconnect_success:
+                                    self.log_message("Reconnected successfully, retrying signal data fetch", log_type="both")
+                                    time.sleep(2)  # Small delay before retry
+                                else:
+                                    raise Exception(f"Failed to reconnect after session token error")
+                            else:
+                                raise e
                     
                     if not signal_data:
                         self.log_message(f"No signal data for band {band}, skipping", log_type="both")
@@ -3088,11 +3157,6 @@ class BandOptimiserApp(tk.Frame):
                     
                     self.log_message(f"Band {band}: RSRP={rsrp_float} dBm, SINR={sinr_float} dB, Score={final_score:.1f}", log_type="detailed")
                     
-                except Exception as e:
-                    error_message = f"Error testing band {band}: {str(e)}"
-                    self.log_message(error_message, log_type="both")
-                    continue
-            
             # Find best 4G band
             if results_4g:
                 sorted_4g = sorted(results_4g.items(), key=lambda x: x[1]["score"], reverse=True)
@@ -3109,31 +3173,99 @@ class BandOptimiserApp(tk.Frame):
                         "ping": results_4g[best_4g_band]["ping"]
                     }
             
-            # Test 5G bands
-            self.log_message("🔄 Testing 5G bands...", log_type="both")
-            for band in self.available_bands["5G"]:
-                try:
-                    # Apply single band
-                    success = apply_band_lock(
-                        self.session or self.client,
-                        self.router_ip.get(),
-                        self.token,
-                        [band]
-                    )
+            # Test 5G bands if available
+            if self.available_bands["5G"]:
+                self.log_message("🔄 Testing 5G bands...", log_type="both")
+                for band in self.available_bands["5G"]:
+                    retry_count = 0
+                    max_retries = 2
+                    success = False
+                    
+                    while not success and retry_count <= max_retries:
+                        try:
+                            # Apply single band
+                            self.log_message(f"Testing band {band}...", log_type="both")
+                            apply_band_lock(
+                                self.session or self.client,
+                                self.router_ip.get(),
+                                self.token,
+                                [band]
+                            )
+                            success = True
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            # Check for session token errors
+                            if ("wrong session token" in error_str or 
+                                "125003" in error_str or 
+                                "100003" in error_str or 
+                                "needs login" in error_str or
+                                "no rights" in error_str) and retry_count < max_retries:
+                                # Session expired during band application, attempt reconnection
+                                retry_count += 1
+                                self.log_message(f"Session token error while applying band {band}. Reconnecting... (Attempt {retry_count})", log_type="both")
+                                
+                                # Reconnect using stored credentials
+                                reconnect_success = self.silent_reconnect(
+                                    self.router_ip.get(),
+                                    self.username.get(),
+                                    self.password.get(),
+                                    self.use_api_lib.get()
+                                )
+                                
+                                if reconnect_success:
+                                    self.log_message("Reconnected successfully, retrying band application", log_type="both")
+                                    time.sleep(2)  # Small delay before retry
+                                else:
+                                    raise Exception(f"Failed to reconnect after session token error")
+                            else:
+                                # Other error, not retry-able
+                                raise e
+                    
                     if not success:
-                        self.log_message(f"Failed to apply band {band}, skipping", log_type="both")
+                        self.log_message(f"Failed to apply band {band} after {max_retries} attempts, skipping", log_type="both")
                         continue
                     
-                    # Wait for band to stabilize - increased to 10 seconds for better 5G stability
+                    # Wait for band to stabilize
                     time.sleep(10)
                     
-                    # Get signal metrics
-                    signal_data = fetch_signal_data(
-                        self,
-                        self.session or self.client,
-                        self.router_ip.get(),
-                        self.token
-                    )
+                    # Get signal metrics - with retry for session errors
+                    retry_count = 0
+                    signal_data = None
+                    
+                    while signal_data is None and retry_count <= max_retries:
+                        try:
+                            signal_data = fetch_signal_data(
+                                self,
+                                self.session or self.client,
+                                self.router_ip.get(),
+                                self.token
+                            )
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if ("wrong session token" in error_str or 
+                                "125003" in error_str or 
+                                "100003" in error_str or 
+                                "needs login" in error_str or
+                                "no rights" in error_str) and retry_count < max_retries:
+                                
+                                retry_count += 1
+                                self.log_message(f"Session token error while fetching signal data. Reconnecting... (Attempt {retry_count})", log_type="both")
+                                
+                                # Reconnect using stored credentials
+                                reconnect_success = self.silent_reconnect(
+                                    self.router_ip.get(),
+                                    self.username.get(),
+                                    self.password.get(),
+                                    self.use_api_lib.get()
+                                )
+                                
+                                if reconnect_success:
+                                    self.log_message("Reconnected successfully, retrying signal data fetch", log_type="both")
+                                    time.sleep(2)  # Small delay before retry
+                                else:
+                                    raise Exception(f"Failed to reconnect after session token error")
+                            else:
+                                raise e
                     
                     if not signal_data:
                         self.log_message(f"No signal data for band {band}, skipping", log_type="both")
@@ -3163,17 +3295,18 @@ class BandOptimiserApp(tk.Frame):
                         upload = 0
                         ping = 999
                     
-                    # Calculate enhanced score with speed test results
+                    # Calculate enhanced score, similar to 4G logic
                     rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
                     sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
                     signal_score = 0.6 * rsrp_norm + 0.4 * sinr_norm
                     
-                    # Adjust for 5G - we value speed more for 5G
-                    download_norm = min(100, download / 2.0) if download > 0 else 0  # Normalize to 200 Mbps
-                    upload_norm = min(100, upload / 1.0) if upload > 0 else 0  # Normalize to 100 Mbps
+                    # Calculate speed score (normalized to 100 Mbps)
+                    download_norm = min(100, download / 1.0) if download > 0 else 0
+                    upload_norm = min(100, upload / 1.0) if upload > 0 else 0
                     speed_score = 0.7 * download_norm + 0.3 * upload_norm
                     
-                    # 5G scoring: 30% signal quality, 70% speed
+                    # Combine signal and speed scores with different weights for 5G
+                    # Enhanced algorithm for 5G: 30% signal quality, 70% speed
                     final_score = 0.3 * signal_score + 0.7 * speed_score
                     
                     # Store results
@@ -3186,12 +3319,7 @@ class BandOptimiserApp(tk.Frame):
                         "ping": ping
                     }
                     
-                    self.log_message(f"5G Band {band}: RSRP={rsrp_float} dBm, SINR={sinr_float} dB, Score={final_score:.1f}", log_type="detailed")
-                    
-                except Exception as e:
-                    error_message = f"Error testing 5G band {band}: {str(e)}"
-                    self.log_message(error_message, log_type="both")
-                    continue
+                    self.log_message(f"Band {band}: RSRP={rsrp_float} dBm, SINR={sinr_float} dB, Score={final_score:.1f}", log_type="detailed")
             
             # Find best 5G band
             if results_5g:
@@ -3215,6 +3343,52 @@ class BandOptimiserApp(tk.Frame):
                 '5G_results': results_5g,
                 'recommended': self.recommended_results
             }, optimisation_type="enhanced")
+            
+            # Restore original bands configuration with retry
+            retry_count = 0
+            max_retries = 2
+            restore_success = False
+            
+            while not restore_success and retry_count <= max_retries:
+                try:
+                    self.log_message("Restoring original band configuration...", log_type="both")
+                    apply_band_lock(
+                        self.session or self.client,
+                        self.router_ip.get(),
+                        self.token,
+                        original_band_config
+                    )
+                    restore_success = True
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # Check for session token errors
+                    if ("wrong session token" in error_str or 
+                        "125003" in error_str or 
+                        "100003" in error_str or 
+                        "needs login" in error_str or
+                        "no rights" in error_str) and retry_count < max_retries:
+                        # Session expired during band restoration, attempt reconnection
+                        retry_count += 1
+                        self.log_message(f"Session token error while restoring band configuration. Reconnecting... (Attempt {retry_count})", log_type="both")
+                        
+                        # Reconnect using stored credentials
+                        reconnect_success = self.silent_reconnect(
+                            self.router_ip.get(),
+                            self.username.get(),
+                            self.password.get(),
+                            self.use_api_lib.get()
+                        )
+                        
+                        if reconnect_success:
+                            self.log_message("Reconnected successfully, retrying band restoration", log_type="both")
+                            time.sleep(2)  # Small delay before retry
+                        else:
+                            self.log_message("Failed to reconnect after session token error during band restoration", log_type="both")
+                            break
+                    else:
+                        # Other error, not retry-able
+                        self.log_message(f"Error restoring band configuration: {str(e)}", log_type="both")
+                        break
             
             # Display report
             self.master.after(0, lambda: self.show_enhanced_optimisation_summary(
