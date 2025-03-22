@@ -288,6 +288,25 @@ BAND_MAP = {
     38: 0x40000000000, 40: 0x100000000000, 41: 0x200000000000, 42: 0x400000000000
 }
 
+# 5G NR Band Map
+NR_BAND_MAP = {
+    1: 0x1,
+    2: 0x2,
+    3: 0x4,
+    5: 0x10,
+    7: 0x40,
+    8: 0x80,
+    20: 0x80000,
+    28: 0x8000000,
+    38: 0x2000000000,
+    41: 0x10000000000, 
+    66: 0x200000000000000,
+    71: 0x4000000000000000,
+    77: 0x100000000000000000,
+    78: 0x200000000000000000,
+    79: 0x400000000000000000
+}
+
 # API Endpoints
 STATUS_ENDPOINT = "/api/monitoring/status"
 LOGIN_ENDPOINT = "/api/user/login"
@@ -343,7 +362,7 @@ def login_to_router(ip, username, password, use_api_lib=True):
             device_info = client.device.information()
             
             # Return client object instead of session for API-based approach
-            return client, None, f"Login Successful (API) - {device_info.get('devicename', '')} {device_info.get('HardwareVersion', '')}"
+            return (client, None, f"Login Successful (API) - {device_info.get('devicename', '')} {device_info.get('HardwareVersion', '')}")
         except Exception as e:
             error_msg = f"API login failed: {str(e)}. Falling back to legacy method."
             print(error_msg)
@@ -357,13 +376,13 @@ def login_to_router(ip, username, password, use_api_lib=True):
     
     reachable, ping_result = ping_host(ip)
     if not reachable:
-        return None, None, f"Router at {ip} is not reachable. Check your connection and IP address."
+        return (None, None, f"Router at {ip} is not reachable. Check your connection and IP address.")
     
     try:
         # Fetch session token
         response = session.get(token_url, timeout=10)
         if response.status_code != 200:
-            return None, None, f"Failed to get CSRF token (Status: {response.status_code})"
+            return (None, None, f"Failed to get CSRF token (Status: {response.status_code})")
         token_data = ET.fromstring(response.text)
         session_id = token_data.find("SesInfo").text
         token = token_data.find("TokInfo").text
@@ -433,134 +452,395 @@ def login_to_router(ip, username, password, use_api_lib=True):
                 info_data = ET.fromstring(info_response.text)
                 firmware = info_data.find("firmwareversion")
                 if firmware is not None:
-                    return session, token, f"Login Successful (Firmware: {firmware.text})"
-            return session, token, "Login Successful"
+                    return (session, token, f"Login Successful (Firmware: {firmware.text})")
+            return (session, token, "Login Successful")
         else:
-            return None, None, f"Login Failed (Status: {response.status_code})"
+            return (None, None, f"Login Failed (Status: {response.status_code})")
     except requests.exceptions.ConnectTimeout:
-        return None, None, f"Connection to {ip} timed out. Verify the router is powered on and the IP is correct."
+        return (None, None, f"Connection to {ip} timed out. Verify the router is powered on and the IP is correct.")
     except requests.exceptions.ConnectionError:
-        return None, None, f"Cannot connect to {ip}. Check if the router is online and accessible."
+        return (None, None, f"Cannot connect to {ip}. Check if the router is online and accessible.")
     except ET.ParseError:
-        return None, None, f"Received invalid XML from router. The device at {ip} may not be a Huawei router."
+        return (None, None, f"Received invalid XML from router. The device at {ip} may not be a Huawei router.")
     except Exception as e:
         error_type = type(e).__name__
-        return None, None, f"Connection Error ({error_type}): {str(e)}"
+        return (None, None, f"Connection Error ({error_type}): {str(e)}")
 
 # Fetch Signal Data using huawei-lte-api library
 def fetch_signal_data_api(self, client, ip):
+    """Fetch signal data using the Huawei LTE API library"""
     try:
-        # Initialize dictionary to store signal data
+        # Verify client is valid before proceeding
+        if client is None:
+            self.log_message("API client is None, cannot fetch signal data", log_type="both")
+            
+            # Try to reconnect if we have credentials
+            if hasattr(self, 'username') and hasattr(self, 'password') and self.username.get() and self.password.get():
+                self.log_message("Attempting to reconnect with saved credentials", log_type="both")
+                reconnection_successful = self.silent_reconnect(
+                    self.router_ip.get(), 
+                    self.username.get(), 
+                    self.password.get(), 
+                    getattr(self, 'use_api_value', True))
+                    
+                if reconnection_successful and self.client:
+                    # If reconnection succeeded, retry with the new client
+                    return fetch_signal_data_api(self, self.client, ip)
+            
+            # If we couldn't reconnect, raise an exception
+            raise Exception("Invalid API client, reconnection attempt failed")
+            
+        # Get signal information
+        signal_info = client.device.signal()
+        
+        # Initialize data dictionary
         signal_data = {}
         
-        # Get device signal data
-        device_signal = client.device.signal()
+        # Extract signal values (structure depends on the API version)
+        if 'rsrp' in signal_info:
+            signal_data['rsrp'] = signal_info.get('rsrp', '--')
+        elif 'cell_id' in signal_info:
+            for cell in signal_info['cell_id']:
+                # Some CPE devices report RSRP for each cell - use the first one with valid data
+                if cell.get('rsrp') and cell.get('rsrp') != '--':
+                    signal_data['rsrp'] = cell.get('rsrp', '--')
+                    signal_data['rsrq'] = cell.get('rsrq', '--')
+                    signal_data['sinr'] = cell.get('sinr', '--')
+                    break
         
-        # Extract relevant signal quality data
-        if isinstance(device_signal, dict):
-            signal_data['rsrp'] = f"{device_signal.get('rsrp', '--')} dBm"
-            signal_data['rsrq'] = f"{device_signal.get('rsrq', '--')} dB"
-            signal_data['sinr'] = f"{device_signal.get('sinr', '--')} dB"
-            signal_data['band'] = device_signal.get('band', '--')
+        # If we don't have RSRP yet, try to get it from the first level
+        if 'rsrp' not in signal_data or not signal_data['rsrp']:
+            signal_data['rsrp'] = signal_info.get('rsrp', '--')
+            signal_data['rsrq'] = signal_info.get('rsrq', '--')
+            signal_data['sinr'] = signal_info.get('sinr', '--')
             
-            # Convert band information to user-friendly format if needed
-            if signal_data['band'] and isinstance(signal_data['band'], str) and signal_data['band'].startswith("LTE BAND"):
-                signal_data['band'] = f"B{signal_data['band'].replace('LTE BAND', '').strip()}"
+        # Make sure RSRQ and SINR are set even if they weren't in the original data
+        if 'rsrq' not in signal_data or not signal_data['rsrq']:
+            signal_data['rsrq'] = signal_info.get('rsrq', '--')
+            # Try alternate field names for RSRQ that might be used
+            if signal_data['rsrq'] == '--':
+                for field in ['rsrq', 'RSRQ', 'rsqr', 'RSQR', 'RsrqRx0', 'RsrqRx1']:
+                    if field in signal_info and signal_info[field] != '--':
+                        signal_data['rsrq'] = signal_info[field]
+                        break
+        
+        if 'sinr' not in signal_data or not signal_data['sinr']:
+            signal_data['sinr'] = signal_info.get('sinr', '--')
+            # Try alternate field names for SINR that might be used
+            if signal_data['sinr'] == '--':
+                for field in ['sinr', 'SINR', 'snr', 'SNR', 'SinrRx0', 'SinrRx1']:
+                    if field in signal_info and signal_info[field] != '--':
+                        signal_data['sinr'] = signal_info[field]
+                        break
+        
+        # Get network mode and band info
+        try:
+            # Try to get detailed band information using different API endpoints
             
-            # Get connection status for network information
+            # Method 1: Try to get from net.net_mode
             try:
-                status_info = client.monitoring.status()
-                if isinstance(status_info, dict):
-                    signal_data['mode'] = status_info.get('CurrentNetworkTypeEx', 'LTE')
+                net_mode_info = client.net.net_mode()
+                # Debug the response
+                self.log_message(f"Net mode info: {net_mode_info}", log_type="detailed")
+                
+                if 'LTEBand' in net_mode_info:
+                    # This is the hex value of the current band
+                    lte_band_hex = net_mode_info.get('LTEBand', '--')
+                    self.log_message(f"LTE band hex: {lte_band_hex}", log_type="detailed")
                     
-                    # Make the network type more user friendly
-                    if signal_data['mode'] == '101':
-                        signal_data['mode'] = '5G NSA'
-                    elif signal_data['mode'] == '38':
-                        signal_data['mode'] = 'NR/5G'
-                    elif signal_data['mode'] == '7':
-                        signal_data['mode'] = 'LTE'
-                    
-                    signal_data['plmn'] = status_info.get('CurrentNetworkOperatorName', '--')
+                    # Convert hex to actual band numbers
+                    if lte_band_hex != '--' and lte_band_hex != '0':
+                        # Try to determine active bands from the hex value
+                        try:
+                            active_bands = []
+                            lte_band_int = int(lte_band_hex, 16)
+                            for band_num, band_hex in BAND_MAP.items():
+                                if lte_band_int & band_hex:
+                                    active_bands.append(f"B{band_num}")
+                            
+                            if active_bands:
+                                signal_data['bands'] = ', '.join(active_bands)
+                                signal_data['band'] = active_bands[0]  # Primary band is first one
+                                signal_data['primary_band'] = active_bands[0]
+                        except Exception as e:
+                            self.log_message(f"Error parsing band hex: {str(e)}", log_type="detailed")
             except Exception as e:
-                self.log_message(f"Error getting connection status via API: {str(e)}", log_type="detailed")
+                self.log_message(f"Error getting net_mode: {str(e)}", log_type="detailed")
+            
+            # Method 2: Try to get from device.signal
+            if 'band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE':
+                if 'cell_id' in signal_info:
+                    for cell in signal_info['cell_id']:
+                        if 'band' in cell and cell['band'] != '--':
+                            band_value = cell['band']
+                            if not band_value.startswith('B') and band_value.isdigit():
+                                band_value = f"B{band_value}"
+                            signal_data['band'] = band_value
+                            break
+                
+                # Try alternate fields that might contain band info
+                band_fields = ['band', 'currentBand', 'activeBand', 'lte_band']
+                for field in band_fields:
+                    if field in signal_info and signal_info[field] != '--':
+                        band_value = signal_info[field]
+                        if not band_value.startswith('B') and band_value.isdigit():
+                            band_value = f"B{band_value}"
+                        signal_data['band'] = band_value
+                        break
+            
+            # Method 3: Try to get from monitoring status
+            if 'band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE':
+                try:
+                    status_info = client.monitoring.status()
+                    if 'CurrentNetworkType' in status_info:
+                        signal_data['mode'] = status_info['CurrentNetworkType']
+                    
+                    # Try to extract band information from various fields
+                    if 'CurrentBand' in status_info and status_info['CurrentBand'] != '--':
+                        band_value = status_info['CurrentBand']
+                        if not band_value.startswith('B') and band_value.isdigit():
+                            band_value = f"B{band_value}"
+                        signal_data['band'] = band_value
+                        
+                    # Try to get more detailed band info if available
+                    band_info_fields = ['LTEBand', 'LTECA', 'CABands', 'LTECAInfo']
+                    for field in band_info_fields:
+                        if field in status_info and status_info[field] != '--':
+                            signal_data['bands'] = status_info[field]
+                            break
+                except Exception as e:
+                    self.log_message(f"Error getting monitoring status: {str(e)}", log_type="detailed")
+                    
+            # If we still don't have band info, try other methods
+            if 'band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE':
+                # Get current PLMN for provider info
+                plmn_info = client.net.current_plmn()
+                signal_data['plmn_name'] = plmn_info.get('FullName', '--')
+                
+                # Try to get network mode info again to fill in missing data
+                mode_info = client.net.network_mode()
+                if 'NetworkMode' in mode_info and mode_info['NetworkMode'] != '--':
+                    signal_data['mode'] = mode_info['NetworkMode']
+                
+                # Last resort - check if there's info from the basic monitoring status
+                monitoring_status = client.monitoring.status()
+                for key, value in monitoring_status.items():
+                    if 'band' in key.lower() and value != '--':
+                        band_value = value
+                        if not band_value.startswith('B') and band_value.isdigit():
+                            band_value = f"B{band_value}"
+                        signal_data['band'] = band_value
+                        break
+            
+            # If we have a bands list but no primary band, set it
+            if 'bands' in signal_data and ('band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE'):
+                # Extract the first band from the list
+                bands_list = signal_data['bands'].split(',')
+                if bands_list:
+                    signal_data['band'] = bands_list[0].strip()
+            
+            # Final fallback - at minimum we want to show if it's LTE/5G/etc.
+            if 'mode' in signal_data and ('band' not in signal_data or signal_data['band'] == '--'):
+                signal_data['band'] = signal_data['mode']
+                
+        except Exception as e:
+            self.log_message(f"Error getting network info: {str(e)}", log_type="detailed")
         
-        # Get recent speedtest results from our stored data if available
-        recent_speedtest = self.get_recent_speedtest_results()
-        if recent_speedtest:
-            signal_data['download'] = f"{recent_speedtest.get('download', '0.00')} Mbps"
-            signal_data['upload'] = f"{recent_speedtest.get('upload', '0.00')} Mbps"
+        # Get traffic statistics if available
+        try:
+            traffic_stats = client.monitoring.traffic_statistics()
+            
+            # Save raw traffic stats to file for debugging
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+            if not os.path.exists(debug_dir):
+                os.makedirs(debug_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_file = os.path.join(debug_dir, f"raw_traffic_stats_{timestamp}.json")
+            with open(debug_file, 'w') as f:
+                json.dump(traffic_stats, f, indent=4, default=str)
+            self.log_message(f"Saved raw traffic stats to {debug_file}", log_type="detailed")
+            
+            # Log the raw values but don't update the UI display
+            current_dl_rate = float(traffic_stats.get('CurrentDownloadRate', 0))
+            current_ul_rate = float(traffic_stats.get('CurrentUploadRate', 0))
+            
+            # Log the raw traffic stats for reference, but don't set in signal_data
+            self.log_message(f"Raw download rate: {current_dl_rate} bytes/s", log_type="detailed")
+            self.log_message(f"Raw upload rate: {current_ul_rate} bytes/s", log_type="detailed")
+            
+            # Calculate and log values but don't assign to signal_data
+            dl_mbps = (current_dl_rate * 8) / 1000000
+            ul_mbps = (current_ul_rate * 8) / 1000000
+            self.log_message(f"Current download rate: {dl_mbps:.2f} Mbps (not displayed in UI)", log_type="detailed")
+            self.log_message(f"Current upload rate: {ul_mbps:.2f} Mbps (not displayed in UI)", log_type="detailed")
+            
+            # Don't assign values to signal_data as per user request
+            # Only speedtest should update these values
+            
+        except Exception as e:
+            self.log_message(f"Error getting traffic stats: {str(e)}", log_type="detailed")
+        
+        # Debug the signal data
+        self.log_message(f"API signal data: {signal_data}", log_type="detailed")
+        
+        # Save processed signal data to file
+        debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+        if not os.path.exists(debug_dir):
+            os.makedirs(debug_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_file = os.path.join(debug_dir, f"processed_signal_data_{timestamp}.json")
+        with open(debug_file, 'w') as f:
+            json.dump(signal_data, f, indent=4, default=str)
+        self.log_message(f"Saved processed signal data to {debug_file}", log_type="detailed")
         
         return signal_data
-        
     except Exception as e:
-        self.log_message(f"Error fetching signal data from API: {str(e)}", log_type="detailed")
-        return {}
+        self.log_message(f"Error in fetch_signal_data_api: {str(e)}", log_type="both")
+        return None
 
 # Unified fetch_signal_data function
 def fetch_signal_data(self, session, ip, token):
     # Check if we're using huawei-lte-api client
-    if hasattr(self, 'client') and self.client is not None and self.use_api_lib.get():
-        return fetch_signal_data_api(self, self.client, ip)
+    if hasattr(session, 'device') and session.__class__.__name__ == 'Client':
+        try:
+            return fetch_signal_data_api(self, session, ip)
+        except Exception as e:
+            error_str = str(e)
+            self.log_message(f"Error fetching signal data from API: {error_str}", log_type="both")
+            
+            # Check for session timeout
+            if "100003" in error_str or "No rights" in error_str or "needs login" in error_str:
+                # Signal this is a session timeout to the caller
+                self.session_timeout_detected = True
+                
+                # Try to silently reconnect if we have credentials
+                if hasattr(self, 'username') and hasattr(self, 'password') and self.username.get() and self.password.get():
+                    self.log_message("Session timeout detected in fetch_signal_data. Attempting to reconnect...", log_type="both")
+                    reconnection_successful = self.silent_reconnect(ip, self.username.get(), self.password.get(), True)
+                    
+                    if reconnection_successful:
+                        # If reconnection was successful, retry fetching data with the new session
+                        try:
+                            return fetch_signal_data(self, self.client, ip, self.token)
+                        except Exception as retry_e:
+                            self.log_message(f"Failed to fetch data after reconnection: {str(retry_e)}", log_type="both")
+            
+            return None
     
+    # Otherwise use the session from requests
     try:
-        # Initialize dictionary to store signal data
-        signal_data = {}
-        
-        # Get signal information using API calls
+        # Get signal status
+        signal_url = f"http://{ip}/api/device/signal"
         headers = {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Cookie': f'SessionID={token}'
+            'Cookie': f'SessionID={token}',
+            '__RequestVerificationToken': token
         }
         
-        # Make API request for signal info
-        response = session.post(f'http://{ip}/api/device/signal', headers=headers)
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                if 'response' in data:
-                    signal_data['rsrp'] = f"{data['response'].get('rsrp', '--')} dBm"
-                    signal_data['rsrq'] = f"{data['response'].get('rsrq', '--')} dB"
-                    signal_data['sinr'] = f"{data['response'].get('sinr', '--')} dB"
-                    signal_data['band'] = data['response'].get('band', '--')
-                    
-                    # Make band info more user-friendly
-                    if signal_data['band'] and isinstance(signal_data['band'], str) and signal_data['band'].startswith("LTE BAND"):
-                        signal_data['band'] = f"B{signal_data['band'].replace('LTE BAND', '').strip()}"
-            except ValueError:
-                self.log_message("Error parsing signal data response", log_type="detailed")
+        response = session.get(signal_url, headers=headers)
         
-        # Get connection status for network type and provider
-        status_response = session.post(f'http://{ip}/api/monitoring/status', headers=headers)
-        if status_response.status_code == 200:
-            try:
-                status_data = status_response.json()
-                if 'response' in status_data:
-                    signal_data['mode'] = status_data['response'].get('CurrentNetworkTypeEx', 'LTE')
+        # Check for session timeout in web response
+        if response.status_code == 401 or "100003" in response.text or not response.ok or "error" in response.text.lower():
+            error_str = response.text
+            self.log_message(f"Error in web API response: {error_str}", log_type="both")
+            
+            # Check for session timeout markers
+            if response.status_code == 401 or "100003" in error_str or "No rights" in error_str or "needs login" in error_str:
+                # Signal this is a session timeout to the caller
+                self.session_timeout_detected = True
+                
+                # Try to silently reconnect if we have credentials
+                if hasattr(self, 'username') and hasattr(self, 'password') and self.username.get() and self.password.get():
+                    self.log_message("Session timeout detected in fetch_signal_data. Attempting to reconnect...", log_type="both")
+                    reconnection_successful = self.silent_reconnect(ip, self.username.get(), self.password.get(), False)
                     
-                    # Make the network type more user-friendly
-                    if signal_data['mode'] == '101':
-                        signal_data['mode'] = '5G NSA'
-                    elif signal_data['mode'] == '38':
-                        signal_data['mode'] = 'NR/5G'
-                    elif signal_data['mode'] == '7':
-                        signal_data['mode'] = 'LTE'
-                        
-                    signal_data['plmn'] = status_data['response'].get('CurrentNetworkOperatorName', '--')
-            except ValueError:
-                self.log_message("Error parsing status data response", log_type="detailed")
+                    if reconnection_successful:
+                        # If reconnection was successful, retry fetching data with the new session
+                        try:
+                            return fetch_signal_data(self, self.session, ip, self.token)
+                        except Exception as retry_e:
+                            self.log_message(f"Failed to fetch data after reconnection: {str(retry_e)}", log_type="both")
+            
+            return None
         
-        # Get recent speedtest results from our stored data if available
-        recent_speedtest = self.get_recent_speedtest_results()
-        if recent_speedtest:
-            signal_data['download'] = f"{recent_speedtest.get('download', '0.00')} Mbps"
-            signal_data['upload'] = f"{recent_speedtest.get('upload', '0.00')} Mbps"
+        # Parse XML response
+        signal_data = {}
+        root = ET.fromstring(response.text)
+        
+        # Extract signal values
+        signal_data['rsrp'] = root.find('.//rsrp').text if root.find('.//rsrp') is not None else '--'
+        signal_data['rsrq'] = root.find('.//rsrq').text if root.find('.//rsrq') is not None else '--'
+        signal_data['sinr'] = root.find('.//sinr').text if root.find('.//sinr') is not None else '--'
+        signal_data['rssi'] = root.find('.//rssi').text if root.find('.//rssi') is not None else '--'
+        signal_data['mode'] = root.find('.//mode').text if root.find('.//mode') is not None else '--'
+        
+        # Get additional information
+        net_url = f"http://{ip}/api/net/current-plmn"
+        response = session.get(net_url, headers=headers)
+        
+        if response.ok:
+            root = ET.fromstring(response.text)
+            signal_data['plmn'] = root.find('.//ShortName').text if root.find('.//ShortName') is not None else '--'
+            
+            # Get detailed band information for 5G
+            try:
+                bands = root.find('.//bands').text if root.find('.//bands') is not None else '--'
+                primary_band = root.find('.//primary_band').text if root.find('.//primary_band') is not None else '--'
+                signal_data['bands'] = bands
+                signal_data['primary_band'] = primary_band
+                
+                # Log detailed band information
+                self.log_message(f"Detailed band info - All bands: {bands}, Primary: {primary_band}", log_type="detailed")
+            except Exception as e:
+                self.log_message(f"Failed to parse detailed 5G band info: {str(e)}", log_type="detailed")
+        
+        # Get band info
+        mon_url = f"http://{ip}/api/device/information"
+        response = session.get(mon_url, headers=headers)
+        
+        if response.ok:
+            root = ET.fromstring(response.text)
+            signal_data['band'] = None
+            
+            # Try to find band through several possible XML paths
+            for path in ['.//workmode', './/WorkMode', './/lteband', './/LTEBand', './/band']:
+                band_elem = root.find(path)
+                if band_elem is not None and band_elem.text:
+                    signal_data['band'] = band_elem.text
+                    break
+            
+            if not signal_data['band']:
+                signal_data['band'] = '--'
+        
+        # Get recent speedtest results if available
+        if hasattr(self, 'get_recent_speedtest_results'):
+            recent_speedtest = self.get_recent_speedtest_results()
+            if recent_speedtest:
+                signal_data['download'] = f"{recent_speedtest.get('download', '0.00')} Mbps"
+                signal_data['upload'] = f"{recent_speedtest.get('upload', '0.00')} Mbps"
         
         return signal_data
-        
     except Exception as e:
-        self.log_message(f"Error fetching signal data: {str(e)}", log_type="detailed")
-        return {}
+        self.log_message(f"Error fetching signal data from web UI: {str(e)}", log_type="both")
+        
+        # Check for session timeout keywords in the exception
+        error_str = str(e)
+        if "100003" in error_str or "No rights" in error_str or "needs login" in error_str or "401" in error_str:
+            # Signal this is a session timeout to the caller
+            self.session_timeout_detected = True
+            
+            # Try to silently reconnect if we have credentials
+            if hasattr(self, 'username') and hasattr(self, 'password') and self.username.get() and self.password.get():
+                self.log_message("Session timeout detected in fetch_signal_data exception. Attempting to reconnect...", log_type="both")
+                reconnection_successful = self.silent_reconnect(ip, self.username.get(), self.password.get(), False)
+                
+                if reconnection_successful:
+                    # If reconnection was successful, retry fetching data with the new session
+                    try:
+                        return fetch_signal_data(self, self.session, ip, self.token)
+                    except Exception as retry_e:
+                        self.log_message(f"Failed to fetch data after reconnection: {str(retry_e)}", log_type="both")
+        
+        return None
 
 # Get connection status
 def get_connection_status(session, ip, token):
@@ -869,15 +1149,13 @@ def generate_report(results, optimisation_type="basic"):
 
 class BandOptimiserApp(tk.Frame):
     def __init__(self, master=None):
+        """Initialize the application"""
         super().__init__(master)
         self.master = master
         self.pack(fill=tk.BOTH, expand=True)
         
         # Initialize config
-        self.config = {}
-        
-        # Initialize variables
-        self.router_ip = tk.StringVar(value="192.168.8.1")
+        self.router_ip = tk.StringVar(value="192.168.1.1")
         self.username = tk.StringVar(value="admin")
         self.password = tk.StringVar(value="")
         self.token = None
@@ -887,12 +1165,23 @@ class BandOptimiserApp(tk.Frame):
         self.api_restriction_warning_shown = False
         self.signal_update_interval = 30000  # 30 seconds
         self.poll_status_task = None  # Initialize to track auto-refresh
+        self.refresh_in_progress = False
+        self.poll_failure_count = 0
+        
+        # Initialize tray icon
+        self.tray_icon = None
+        self.icon_path = "assets/icon.ico"
+        
+        # Add variables for signal monitoring
+        self.last_signal = {}
+        self.notify_on_signal_change = tk.BooleanVar(value=True)
+        self.signal_change_threshold = 3  # dB change that triggers notification
         
         # UI state variables
         self.status_var = tk.StringVar(value="Not Connected")
         self.auto_connect = tk.BooleanVar(value=False)
         self.use_api_lib = tk.BooleanVar(value=True)
-        self.auto_refresh = tk.BooleanVar(value=False)
+        self.auto_refresh = tk.BooleanVar(value=True)
         self.monitor_bands = tk.BooleanVar(value=False)
         self.run_speed_on_start = tk.BooleanVar(value=False)
         self.minimize_to_tray = tk.BooleanVar(value=False)
@@ -901,15 +1190,33 @@ class BandOptimiserApp(tk.Frame):
         self.band_vars = {}
         for band in SUPPORTED_4G_BANDS:
             band_name = f"B{band}"
-            self.band_vars[band_name] = tk.BooleanVar()
+            self.band_vars[band_name] = tk.BooleanVar(value=False)
         
         for band in SUPPORTED_5G_BANDS:
             band_name = f"n{band}"
-            self.band_vars[band_name] = tk.BooleanVar()
+            self.band_vars[band_name] = tk.BooleanVar(value=False)
         
-        # Network aggregation variables
+        # Signal display variables
+        self.signal_info = {
+            'RSRP': tk.StringVar(value="--"),
+            'RSRQ': tk.StringVar(value="--"),
+            'SINR': tk.StringVar(value="--"),
+            'BAND': tk.StringVar(value="--"),
+            'NETWORK_TYPE': tk.StringVar(value="--"),
+            'CARRIER': tk.StringVar(value="--"),
+            'DOWNLOAD': tk.StringVar(value="--"),
+            'UPLOAD': tk.StringVar(value="--")
+        }
+        
+        # Initialize band variables for network aggregation
         self.upload_band_vars = {}
         self.download_band_vars = {}
+        
+        # Initialize the specific bands used in network aggregation
+        for band_num in [1, 3, 7, 8]:  # These specific bands are used in the UI
+            band = f"B{band_num}"
+            self.upload_band_vars[band] = tk.BooleanVar(value=False)
+            self.download_band_vars[band] = tk.BooleanVar(value=False)
         
         # Initialize available bands with defaults
         self.available_bands = {
@@ -917,78 +1224,41 @@ class BandOptimiserApp(tk.Frame):
             "5G": SUPPORTED_5G_BANDS
         }
         
-        # Initialize band variables for network aggregation
-        for band_num in [1, 3, 7, 8]:
-            band = f"B{band_num}"
-            self.upload_band_vars[band] = tk.BooleanVar()
-            self.download_band_vars[band] = tk.BooleanVar()
-        
-        # Create dictionary for signal information display
-        self.signal_info = {
-            "RSRP": tk.StringVar(value="--"),
-            "RSRQ": tk.StringVar(value="--"),
-            "SINR": tk.StringVar(value="--"),
-            "BAND": tk.StringVar(value="--"),
-            "NETWORK_TYPE": tk.StringVar(value="--"),
-            "CARRIER": tk.StringVar(value="--"),
-            "DOWNLOAD": tk.StringVar(value="--"),
-            "UPLOAD": tk.StringVar(value="--")
-        }
-        
-        # Create log text widget for detailed status display
-        self.log_text = None
-        
-        # Set icon path
-        self.icon_path = "assets/icon.ico"
-        
-        # Initialize tray icon to None
-        self.tray_icon = None
-        
-        # Create UI elements
+        # Create the UI
         self.create_menu()
         self.create_main_frame()
         
-        # Set window title and size
-        self.master.title("Huawei CPE Pro 2 Band Scanner and Optimizer")
-        self.master.geometry("800x600")
-        self.master.minsize(800, 600)
-        
-        # Set icon
-        try:
-            self.master.iconbitmap(self.icon_path)
-        except:
-            pass
-        
-        # Load config file if available
+        # Load config
         self.load_config()
+        
+        # Setup system tray
+        self.setup_tray_icon()
+        
+        # Schedule a check for library version
+        self.master.after(1000, self.check_library_version)
         
         # Auto-connect if enabled
         if self.auto_connect.get():
-            self.connect()
-            
-        # Initialize system tray
-        self.setup_tray_icon()
-        
-        # Log startup message
-        self.log_message("Application started", log_type="both")
+            self.master.after(1500, self.connect)
 
     def load_config(self):
-        """Load saved configuration"""
+        """Load configuration from file"""
         try:
             config = load_config()
             
             # Apply configuration to variables
-            self.router_ip.set(config.get("router_ip", "192.168.8.1"))
+            self.router_ip.set(config.get("router_ip", "192.168.1.1"))
             self.username.set(config.get("username", "admin"))
             self.password.set(config.get("password", ""))  # Load the password directly
             
             # Load other settings
             self.auto_connect.set(config.get("auto_connect", False))
             self.use_api_lib.set(config.get("use_api_lib", True))
-            self.run_speed_on_start.set(config.get("speedtest_on_startup", False))
-            self.auto_refresh.set(config.get("auto_refresh", False))
+            self.run_speed_on_start.set(config.get("run_speed_on_start", False))
+            self.auto_refresh.set(config.get("auto_refresh", True))
             self.monitor_bands.set(config.get("monitor_bands", False))
             self.minimize_to_tray.set(config.get("minimize_to_tray", False))
+            self.notify_on_signal_change.set(config.get("notify_on_signal_change", True))
             
             # Load band selections
             selected_bands = config.get("selected_bands", [])
@@ -1003,25 +1273,29 @@ class BandOptimiserApp(tk.Frame):
 
     def create_menu(self):
         # Create top menu
-        menubar = tk.Menu(self.master)
-        self.master.config(menu=menubar)
+        menu_bar = tk.Menu(self.master)
+        self.master.config(menu=menu_bar)
         
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
+        # Create File menu
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        
         file_menu.add_command(label="Connect", command=self.connect)
         file_menu.add_command(label="Disconnect", command=self.disconnect)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.exit_app)  # Use exit_app instead of master.quit
+        file_menu.add_command(label="Exit", command=self.on_close)
         
-        # Tools menu
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="Run Speedtest", command=self.start_speedtest)
+        # Create Tools menu
+        tools_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Tools", menu=tools_menu)
         
-        # Options menu
-        options_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Options", menu=options_menu)
+        tools_menu.add_command(label="Speed Test", command=self.start_speedtest)
+        tools_menu.add_command(label="Apply Band Selection", command=self.apply_band_selection)
+        
+        # Create Options menu
+        options_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="Options", menu=options_menu)
+        
         options_menu.add_checkbutton(label="Auto Refresh", variable=self.auto_refresh, 
                                     command=self.toggle_auto_refresh)
         options_menu.add_checkbutton(label="Monitor and Lock Bands", variable=self.monitor_bands,
@@ -1029,7 +1303,12 @@ class BandOptimiserApp(tk.Frame):
         options_menu.add_checkbutton(label="Minimize to Tray on Close", variable=self.minimize_to_tray,
                                    command=self.save_config)  # Ensure this saves config when changed
         
-        # Skip the Help menu entirely to avoid missing function references
+        # Add notifications option
+        options_menu.add_checkbutton(
+            label="Signal Change Notifications", 
+            variable=self.notify_on_signal_change, 
+            command=self.save_config
+        )
         
         # Add auto-connect option
         options_menu.add_checkbutton(
@@ -1075,22 +1354,27 @@ class BandOptimiserApp(tk.Frame):
         main_frame = ttk.Frame(self.master, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Connection panel
-        conn_frame = ttk.LabelFrame(main_frame, text="Router Connection", padding="10")
-        conn_frame.pack(fill=tk.X, pady=5)
+        # Create top section for router connection
+        connection_frame = ttk.LabelFrame(main_frame, text="Router Connection", padding="5")
+        connection_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        ttk.Label(conn_frame, text="Router IP:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        ttk.Entry(conn_frame, textvariable=self.router_ip).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        # Add error status label for displaying errors without popups
+        self.error_display = ttk.Label(main_frame, text="", foreground="red", wraplength=780)
+        self.error_display.pack(fill=tk.X, padx=5, pady=5)
         
-        ttk.Label(conn_frame, text="Username:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        ttk.Entry(conn_frame, textvariable=self.username).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        # Create grid for connection form
+        ttk.Label(connection_frame, text="Router IP:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(connection_frame, textvariable=self.router_ip).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
         
-        ttk.Label(conn_frame, text="Password:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-        password_entry = ttk.Entry(conn_frame, textvariable=self.password, show="*")
+        ttk.Label(connection_frame, text="Username:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(connection_frame, textvariable=self.username).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        ttk.Label(connection_frame, text="Password:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        password_entry = ttk.Entry(connection_frame, textvariable=self.password, show="*")
         password_entry.grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
         
         # Options frame
-        options_frame = ttk.Frame(conn_frame)
+        options_frame = ttk.Frame(connection_frame)
         options_frame.grid(row=0, column=2, rowspan=3, padx=10)
         
         auto_connect_cb = ttk.Checkbutton(options_frame, text="Auto-connect at startup", variable=self.auto_connect)
@@ -1107,7 +1391,7 @@ class BandOptimiserApp(tk.Frame):
         minimize_tray_cb.pack(anchor=tk.W, pady=2)
         
         # Connect button
-        self.connect_button = ttk.Button(conn_frame, text="Connect", command=self.connect)
+        self.connect_button = ttk.Button(connection_frame, text="Connect", command=self.connect)
         self.connect_button.grid(row=0, column=3, rowspan=3, padx=10)
         
         # Create tooltip for connect button
@@ -1133,7 +1417,8 @@ class BandOptimiserApp(tk.Frame):
             ("RSRP (dBm):", "RSRP", "--"),
             ("RSRQ (dB):", "RSRQ", "--"),
             ("SINR (dB):", "SINR", "--"),
-            ("Current Band:", "BAND", "--"),
+            ("Primary Band:", "PRIMARY_BAND", "--"),
+            ("All Bands:", "BAND", "--"),
             ("Network Type:", "NETWORK_TYPE", "LTE"),
             ("Provider:", "CARRIER", "--"),
             ("Download:", "DOWNLOAD", "0.00 Mbps"),
@@ -1397,412 +1682,191 @@ class BandOptimiserApp(tk.Frame):
             print(f"[{timestamp}] Error logging: {str(e)}")
     
     def connect(self):
-        """Connect to the router"""
-        # Don't connect if already connected
-        if self.is_connected:
-            self.log_message("Already connected", log_type="both")
-            return
-            
-        # Get connection details
+        """Connect to the router using the specified IP, username and password"""
+        # Get values from UI
         ip = self.router_ip.get()
         username = self.username.get()
         password = self.password.get()
         use_api = self.use_api_lib.get()
         
         # Validate inputs
-        if not ip or not username or not password:
-            messagebox.showerror("Error", "Please enter router IP, username and password")
+        if not ip:
+            self.log_message("Please enter router IP address", log_type="both")
+            self.error_display.config(text="Please enter router IP address")
             return
-            
-        # Update UI
-        self.status_var.set("Connecting...")
-        self.log_message(f"Connecting to {ip}...", log_type="both")
         
-        # Start connection thread
-        self.connect_button.config(state=tk.DISABLED)
-        threading.Thread(target=lambda: self.connect_thread(ip, username, password, use_api)).start()
-    
+        if not username or not password:
+            self.log_message("Please enter username and password", log_type="both")
+            self.error_display.config(text="Please enter username and password")
+            return
+        
+        # Update button text to indicate connecting, but keep it clickable
+        self.connect_button.config(text="Connecting...")
+        
+        # Store values for use by worker thread
+        self.log_message(f"Connecting to router at {ip}...", log_type="both")
+        
+        # Try to connect in a separate thread to keep UI responsive
+        threading.Thread(target=lambda: self.connect_thread(ip, username, password, use_api), daemon=True).start()
+
+    def disconnect(self):
+        """Disconnect from the router"""
+        if hasattr(self, 'is_connected') and self.is_connected:
+            try:
+                if hasattr(self, 'client') and self.client is not None:
+                    # Close API connection
+                    self.client.connection.close()
+                    self.client = None
+                elif hasattr(self, 'session') and self.session is not None:
+                    # Logout from web session
+                    logout_url = f"http://{self.router_ip.get()}/logout"
+                    self.session.get(logout_url)
+                    self.session = None
+                
+                # Clear token
+                self.token = None
+                
+                # Cancel any polling tasks
+                if hasattr(self, 'poll_status_task') and self.poll_status_task is not None:
+                    self.master.after_cancel(self.poll_status_task)
+                    self.poll_status_task = None
+                
+                # Update connection state
+                self.is_connected = False
+                
+                # Update UI
+                if hasattr(self, 'connect_button'):
+                    self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
+                
+                # Clear signal information
+                for var in self.signal_info.values():
+                    var.set("--")
+                
+                # Clear any error messages
+                if hasattr(self, 'error_display'):
+                    self.error_display.config(text="")
+                
+                self.log_message("Disconnected from router", log_type="both")
+                
+            except Exception as e:
+                self.log_message(f"Error disconnecting: {str(e)}", log_type="both")
+                if hasattr(self, 'error_display'):
+                    self.error_display.config(text=f"Error disconnecting: {str(e)}")
+        else:
+            self.log_message("Not connected to any router", log_type="both")
+            
     def connect_thread(self, ip, username, password, use_api):
-        """Background thread for connecting to router"""
+        """Background thread for connecting to the router"""
         try:
-            # Connect to router
+            # Store credentials for auto-reconnect
+            self.username.set(username)
+            self.password.set(password)
+            self.use_api_value = use_api  # This is used for silent reconnect
+            
+            # Initialize last activity timestamp
+            if not hasattr(self, 'last_activity'):
+                self.last_activity = time.time()
+            
+            # Try to connect to router
             result = login_to_router(ip, username, password, use_api)
             
-            # Process connection result on main thread
+            # Handle result on the main thread
             self.master.after(0, lambda: self.handle_connection_result(result, ip))
+            
         except Exception as e:
-            # Log error and update UI on main thread
-            error_message = f"Connection error: {str(e)}"
-            self.master.after(0, lambda: self.log_message(error_message, log_type="both"))
-            self.master.after(0, lambda: self.status_var.set("Connection failed"))
-            self.master.after(0, lambda: self.connect_button.config(state=tk.NORMAL))
-            # Show error message box
+            error_message = f"Error connecting to router: {str(e)}"
+            self.log_message(f"❌ {error_message}", log_type="both")
+            
+            # Reset button on the main thread without disabling
+            self.master.after(0, lambda: self.connect_button.config(text="Connect", command=self.connect))
+            
+            # Show error message
+            self.master.after(0, lambda: self.error_display.config(text=error_message))
             self.master.after(0, lambda: messagebox.showerror("Connection Error", error_message))
     
     def handle_connection_result(self, result, ip):
         """Handle the result from the connection thread"""
-        if isinstance(result, tuple):
-            # Process tuple format result (session/client, token, message)
-            success = bool(result[0])  # First element is session/client, which is truthy if connection succeeded
-            
-            if success:
-                # Update connection status
-                self.is_connected = True
-                
-                # Determine if we're using API client or session
-                if HUAWEI_API_AVAILABLE and isinstance(result[0], Client):
-                    self.client = result[0]
-                    self.session = None
-                    self.token = None
-                    self.log_message("Connected using Huawei LTE API", log_type="both")
-                else:
-                    self.client = None
-                    self.session = result[0]
-                    self.token = result[1] if len(result) > 1 else None
-                    self.log_message("Connected using web interface", log_type="both")
-                
-                # Update status
-                status_message = f"Connected to {ip}"
-                if len(result) > 2:
-                    status_message += f" ({result[2]})"
-                self.status_var.set(status_message)
-                
-                # Update connect button
-                self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
-                
-                # Get available bands
-                self.available_bands = scan_available_bands(self.client or self.session, ip, self.token)
-                self.log_message(f"Available 4G bands: {', '.join(self.available_bands['4G'])}", log_type="both")
-                self.log_message(f"Available 5G bands: {', '.join(self.available_bands['5G'])}", log_type="both")
-                
-                # Update band selection UI with available bands
-                self.update_band_selection_ui()
-                
-                # Get initial signal information
-                self.refresh_signal()
-                
-                # Start auto-refresh if enabled
-                if self.auto_refresh.get():
-                    self.log_message("Starting auto-refresh polling", log_type="detailed")
-                    # Cancel any existing poll task first
-                    if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                        self.master.after_cancel(self.poll_status_task)
-                    # Start a new polling task (30 seconds from now)
-                    self.poll_status_task = self.master.after(30000, self.poll_status)
-                
-                # Run initial speedtest if enabled
-                if self.run_speed_on_start.get():
-                    self._run_initial_speedtest()
-            else:
-                # Connection failed
-                error_msg = result[2] if len(result) > 2 else "Unknown error"
-                self.log_message(f"Connection failed: {error_msg}", log_type="both")
-                self.status_var.set("Connection failed")
-                self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
-                messagebox.showerror("Connection Error", error_msg)
-        
-        elif isinstance(result, dict):
-            # Process dictionary format result
-            if result.get("status") == "success":
-                # Update connection status
-                self.is_connected = True
-                self.client = result.get("client")
-                self.session = result.get("session")
-                self.token = result.get("token")
-                
-                # Update status
-                self.status_var.set(f"Connected to {ip}")
-                self.log_message(f"Connected to router at {ip}", log_type="both")
-                
-                # Update connect button
-                self.connect_button.config(text="Disconnect", command=self.disconnect, state=tk.NORMAL)
-                
-                # Get available bands
-                self.available_bands = scan_available_bands(self.client or self.session, ip, self.token)
-                self.log_message(f"Available 4G bands: {', '.join(self.available_bands['4G'])}", log_type="both")
-                self.log_message(f"Available 5G bands: {', '.join(self.available_bands['5G'])}", log_type="both")
-                
-                # Update band selection UI with available bands
-                self.update_band_selection_ui()
-                
-                # Get initial signal information
-                self.refresh_signal()
-                
-                # Start auto-refresh if enabled
-                if self.auto_refresh.get():
-                    self.log_message("Starting auto-refresh polling", log_type="detailed")
-                    # Cancel any existing poll task first
-                    if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                        self.master.after_cancel(self.poll_status_task)
-                    # Start a new polling task (30 seconds from now)
-                    self.poll_status_task = self.master.after(30000, self.poll_status)
-                
-                # Run initial speedtest if enabled
-                if self.run_speed_on_start.get():
-                    self._run_initial_speedtest()
-            else:
-                # Connection failed
-                error_msg = result.get("message", "Unknown error")
-                self.log_message(f"Connection failed: {error_msg}", log_type="both")
-                self.status_var.set("Connection failed")
-                self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
-                messagebox.showerror("Connection Error", error_msg)
-        
-        else:
-            # Unexpected result format
-            self.log_message(f"Unexpected connection result format: {type(result)}", log_type="both")
-            self.status_var.set("Connection failed")
-            self.connect_button.config(text="Connect", command=self.connect, state=tk.NORMAL)
-            messagebox.showerror("Connection Error", "Unexpected result format")
-    
-    def _run_initial_speedtest(self):
-        """Run initial speedtest after connection"""
-        
-        def initial_speedtest_thread():
-            try:
-                # First update to show we're starting
-                def update_progress(step=0):
-                    if step == 0:
-                        self.log_message("Running initial speed test...", log_type="standard")
-                        self.signal_info["DOWNLOAD"].set("Testing...")
-                        self.signal_info["UPLOAD"].set("Testing...")
-                    elif step == 1:
-                        self.signal_info["DOWNLOAD"].set("Testing...")
-                        self.signal_info["UPLOAD"].set("Testing...")
-                
-                # Update UI to show we're starting
-                self.master.after(0, update_progress)
-                
-                # Run the speedtest
-                result = run_speedtest()
-                
-                # Process results
-                if result["success"]:
-                    dl = result["download"]
-                    ul = result["upload"]
-                    ping = result["ping"]
-                    server = result["server"]
-                    
-                    # Store the results
-                    self.latest_speedtest_results = result
-                    self.last_speedtest_dl = dl
-                    self.last_speedtest_ul = ul
-                    
-                    # Update signal information with the new speed values
-                    self.signal_info["DOWNLOAD"].set(f"{dl:.2f} Mbps")
-                    self.signal_info["UPLOAD"].set(f"{ul:.2f} Mbps")
-                    
-                    # Log the initial speed test results
-                    self.log_message(f"✅ Speedtest.net results: {dl:.2f} Mbps down, {ul:.2f} Mbps up, {ping:.2f} ms ping", log_type="standard")
-                    self.log_message(f"Server used: {server}", log_type="detailed")
-                else:
-                    error_message = f"⚠️ Speedtest failed: {result['message']}"
-                    self.log_message(error_message, log_type="both")
-                    self.master.after(0, lambda: messagebox.showwarning("Speedtest Failed", result['message']))
-            except Exception as e:
-                error_message = f"⚠️ Error during speedtest: {str(e)}"
-                self.log_message(error_message, log_type="both")
-                self.master.after(0, lambda: messagebox.showerror("Speedtest Error", str(e)))
-        
-        threading.Thread(target=initial_speedtest_thread, daemon=True).start()
-    
-    def disconnect(self):
-        """Disconnect from the router"""
-        if not self.is_connected:
-            return
-            
-        # Reset state
-        self.is_connected = False
-        self.client = None
-        self.session = None
-        self.token = None
-        
-        # Update UI
-        self.status_var.set("Disconnected")
-        self.connect_button.config(text="Connect", command=self.connect)
-        self.refresh_button.config(state=tk.DISABLED)
-        
-        # Stop auto-refresh if enabled
-        if self.auto_refresh.get():
-            self.toggle_auto_refresh()
-        
-        # Log message
-        self.log_message("Disconnected from router", log_type="both")
-    
-    def refresh_signal(self):
-        # Disable refresh button while refreshing
-        if hasattr(self, 'refresh_button'):
-            self.refresh_button.config(state=tk.DISABLED)
-            
-            # Force re-enable after 3 seconds as a failsafe
-            self.master.after(3000, lambda: self.refresh_button.config(state=tk.NORMAL))
-        
-        # Run in background thread
-        threading.Thread(target=self.refresh_thread, daemon=True).start()
-    
-    def refresh_thread(self):
-        """Background thread for refreshing signal data"""
         try:
-            # Get router IP
-            ip = self.router_ip.get()
-            token = self.token
-            
-            # Get the current band before refresh (if available)
-            previous_band = self.signal_info['BAND'].get() if 'BAND' in self.signal_info else ""
-            
-            # Fetch fresh signal data
-            signal_data = fetch_signal_data(self, self.session or self.client, ip, token)
-            
-            if signal_data:
-                # Update UI with signal data
-                self.master.after(0, lambda: self.update_signal_ui(signal_data))
+            # Check if we got a valid result
+            if result and len(result) >= 3:
+                session_or_client = result[0]
+                token = result[1]
+                message = result[2]
                 
-                # Check if need to reapply band lock
-                if previous_band and 'BAND' in signal_data:
-                    # New band is different than before
-                    # Schedule a check band lock in 5 seconds
-                    self.master.after(5000, self.check_band_lock)
-            else:
-                error_message = "Failed to fetch signal data. The router may be unresponsive."
-                self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-                self.master.after(0, lambda: messagebox.showerror("Signal Error", error_message))
-        except Exception as e:
-            error_message = f"Error refreshing signal data: {str(e)}"
-            self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-            self.master.after(0, lambda: messagebox.showerror("Signal Error", error_message))
-        finally:
-            # Re-enable refresh button
-            if hasattr(self, 'refresh_button'):
-                self.master.after(0, lambda: self.refresh_button.config(state=tk.NORMAL))
-    
-    def update_signal_ui(self, signal_data):
-        # Define mapping between signal_data keys and display keys
-        field_mapping = {
-            'rsrp': 'RSRP',
-            'rsrq': 'RSRQ',
-            'sinr': 'SINR',
-            'band': 'BAND',
-            'mode': 'NETWORK_TYPE',
-            'plmn': 'CARRIER',
-            'download': 'DOWNLOAD',
-            'upload': 'UPLOAD'
-        }
-        
-        # Log current signal values for debugging
-        self.log_message(f"Updating signal UI with new data: " +
-                       f"Band: {signal_data.get('band', 'N/A')}, " +
-                       f"RSRP: {signal_data.get('rsrp', 'N/A')}", log_type="detailed")
-        
-        # Update each field if data exists
-        for data_key, ui_key in field_mapping.items():
-            if data_key in signal_data and ui_key in self.signal_info:
-                # For network_type, convert numeric codes to user-friendly text
-                if data_key == 'mode' and signal_data[data_key]:
-                    mode_val = signal_data[data_key]
-                    
-                    # Convert numeric codes to user-friendly text
-                    if mode_val == '101':
-                        display_value = '5G NSA'
-                    elif mode_val == '38':
-                        display_value = 'NR/5G'
-                    elif mode_val == '7':
-                        display_value = '4G'
-                    elif mode_val == '1011':
-                        display_value = '4G+'
+                if session_or_client is not None:
+                    # Connection successful
+                    # Check which method was used and properly initialize
+                    if self.use_api_lib.get() and HUAWEI_API_AVAILABLE and hasattr(session_or_client, 'device'):
+                        # API client
+                        self.client = session_or_client
+                        self.session = None
+                        self.log_message(f"Connected using Huawei LTE API (client initialized: {self.client is not None})", log_type="both")
                     else:
-                        # Try to make other network types user-friendly
-                        network_types = {
-                            "0": "No Service", "1": "GSM", "2": "GPRS", "3": "EDGE", "4": "WCDMA",
-                            "5": "HSDPA", "6": "HSUPA", "7": "4G", "8": "TD-SCDMA", "9": "HSPA+",
-                            "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA"
-                        }
-                        display_value = network_types.get(str(mode_val), mode_val)
+                        # Web session
+                        self.session = session_or_client
+                        self.client = None
+                        self.log_message(f"Connected using web session (session initialized: {self.session is not None})", log_type="both")
                     
-                    self.signal_info[ui_key].set(display_value)
+                    self.token = token
+                    self.is_connected = True
+                    
+                    # Initialize polling failure counter
+                    self.poll_failure_count = 0
+                    
+                    # Update UI
+                    self.status_var.set("Connected")
+                    self.connect_button.config(text="Disconnect", command=self.disconnect)
+                    
+                    # Start auto-refresh polling if enabled
+                    if self.auto_refresh.get():
+                        # Start session keepalive
+                        self.start_session_keepalive()
+                        
+                        # Start polling
+                        self.poll_status()
+                        self.log_message("Auto-refresh enabled. Signal will update every 30 seconds.", log_type="both")
+                        
+                    # Scan for available bands
+                    threading.Thread(target=self.update_band_selection_ui, daemon=True).start()
+                    
+                    # Refresh signal once after connection
+                    threading.Thread(target=self.refresh_signal, daemon=True).start()
+                    
+                    # Clear any error messages
+                    self.error_display.config(text="")
                 else:
-                    # Use data as is
-                    display_value = signal_data[data_key]
+                    # Connection failed
+                    error_message = message if message else "Unknown connection error"
+                    self.log_message(f"❌ Connection failed: {error_message}", log_type="both")
+                    self.status_var.set("Connection failed")
+                    self.connect_button.config(text="Connect", command=self.connect)
+                    self.error_display.config(text=error_message)
                     
-                # Handle empty or null values
-                if display_value is None or display_value == '' or display_value == '--':
-                    display_value = 'N/A'
-                
-                self.signal_info[ui_key].set(display_value)
-        
-        # Update the band checkboxes based on the current active band
-        if 'band' in signal_data and signal_data['band'] and signal_data['band'] != '--' and signal_data['band'] != 'N/A':
-            active_band = signal_data['band']
-            self.log_message(f"Active band detected: {active_band}", log_type="detailed")
-            
-            # First, uncheck all bands
-            for band, var in self.band_vars.items():
-                var.set(False)
-            
-            # Try to find the band in our checkboxes with different formats
-            found = False
-            
-            # Direct match
-            if active_band in self.band_vars:
-                self.band_vars[active_band].set(True)
-                self.log_message(f"Updated band selection UI to show active band: {active_band}", log_type="detailed")
-                found = True
-            # If the band is a number without the "B" prefix, try with the prefix
-            elif active_band.isdigit() and f"B{active_band}" in self.band_vars:
-                self.band_vars[f"B{active_band}"].set(True)
-                self.log_message(f"Updated band selection UI to show active band: B{active_band}", log_type="detailed")
-                found = True
-            # If the band has a "B" prefix, try without it
-            elif active_band.startswith('B') and active_band[1:].isdigit() and active_band[1:] in self.band_vars:
-                self.band_vars[active_band[1:]].set(True)
-                self.log_message(f"Updated band selection UI to show active band: {active_band[1:]}", log_type="detailed")
-                found = True
-                
-            if not found:
-                self.log_message(f"Could not find checkbox for active band: {active_band} (not in available bands)", log_type="detailed")
-                # Log available bands for debugging
-                self.log_message(f"Available band checkboxes: {list(self.band_vars.keys())}", log_type="detailed")
-        
-        # Update RSRP color
-        self.update_rsrp_color(signal_data.get('rsrp', 'N/A'))
-    
-    def update_rsrp_color(self, rsrp_value):
-        """Update the RSRP display color based on signal strength"""
-        try:
-            # Extract the numeric value from the RSRP string (remove "dBm" if present)
-            if isinstance(rsrp_value, str):
-                if "dBm" in rsrp_value:
-                    rsrp_value = rsrp_value.replace("dBm", "").strip()
-                if rsrp_value == "N/A" or rsrp_value == "--":
-                    # No valid RSRP value
-                    return
-                
-            # Convert to float
-            rsrp_float = float(rsrp_value)
-            
-            # Determine color based on RSRP value
-            # Excellent: > -80 dBm
-            # Good: -80 to -90 dBm
-            # Fair: -90 to -100 dBm
-            # Poor: < -100 dBm
-            if rsrp_float >= -80:
-                color = "#00CC00"  # Green
-            elif rsrp_float >= -90:
-                color = "#99CC00"  # Light green
-            elif rsrp_float >= -100:
-                color = "#CCCC00"  # Yellow
+                    # Show error dialog
+                    messagebox.showerror("Connection Error", error_message)
             else:
-                color = "#CC0000"  # Red
+                # Invalid result
+                error_message = "Invalid connection result"
+                if result and len(result) >= 3:
+                    error_message = result[2] if result[2] else error_message
+                    
+                self.log_message(f"❌ {error_message}", log_type="both")
+                self.status_var.set("Connection failed")
+                self.connect_button.config(text="Connect", command=self.connect)
+                self.error_display.config(text=error_message)
                 
-            # Update the RSRP label color if it exists
-            if hasattr(self, "signal_info") and "RSRP" in self.signal_info:
-                if hasattr(self.signal_info["RSRP"], "config"):
-                    # If it's a label
-                    self.signal_info["RSRP"].config(foreground=color)
-                # For StringVars we don't change colors, as they don't have a direct color property
+                # Show error dialog
+                messagebox.showerror("Connection Error", error_message)
+            
         except Exception as e:
-            # Silently fail if there's any error - this is non-essential functionality
-            self.log_message(f"Error updating RSRP color: {str(e)}", log_type="detailed")
-            pass
+            error_message = f"Error handling connection result: {str(e)}"
+            self.log_message(f"❌ {error_message}", log_type="both")
+            self.status_var.set("Connection error")
+            self.connect_button.config(text="Connect", command=self.connect)
+            self.error_display.config(text=error_message)
+            
+            # Show error dialog
+            messagebox.showerror("Connection Error", error_message)
 
     def show_enhanced_optimisation_summary(self, results_4g, results_5g, recommended_results, report_path):
         """Show enhanced optimisation summary with separate 4G and 5G results"""
@@ -2061,129 +2125,21 @@ class BandOptimiserApp(tk.Frame):
             ttk.Button(button_frame, text="Apply 5G Configuration", command=apply_5g).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="View Report", command=view_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=5)
-    
-    def start_speedtest(self):
-        """Start a speedtest.net measurement"""
-        if hasattr(self, 'speedtest_button'):
-            self.speedtest_button.config(state=tk.DISABLED)
-            
-        self.log_message("🚀 Starting speedtest.net measurement (will take 15-30 seconds)...", log_type="standard")
-        
-        # Run in background thread
-        def speedtest_thread():
-            try:
-                # Show progress updates
-                progress_steps = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                progress_task = None
-                
-                def update_progress(step=0):
-                    nonlocal progress_task
-                    symbol = progress_steps[step % len(progress_steps)]
-                    self.log_message(f"{symbol} Speedtest in progress... (this may take 15-30 seconds)", log_type="standard", replace_last=True)
-                    progress_task = self.master.after(500, lambda: update_progress(step + 1))
-                
-                # Start progress updates
-                update_progress()
-                
-                # Run the speed test
-                result = run_speedtest()
-                
-                # Cancel progress updates
-                if progress_task:
-                    self.master.after_cancel(progress_task)
-                
-                # Process results
-                if result["success"]:
-                    dl = result["download"]
-                    ul = result["upload"]
-                    ping = result["ping"]
-                    server = result["server"]
-                    
-                    # Store results for later use
-                    self.latest_speedtest_results = result
-                    self.last_speedtest_dl = dl
-                    self.last_speedtest_ul = ul
-                    self.last_speedtest_time = time.time()
-                    
-                    # Update signal information with the new speed values
-                    self.signal_info["DOWNLOAD"].set(f"{dl:.2f} Mbps")
-                    self.signal_info["UPLOAD"].set(f"{ul:.2f} Mbps")
-                    
-                    # Log the speed test results
-                    self.log_message(f"✅ Speedtest.net results: {dl:.2f} Mbps down, {ul:.2f} Mbps up, {ping:.2f} ms ping", log_type="standard")
-                    self.log_message(f"Server used: {server}", log_type="detailed")
-                else:
-                    error_message = f"⚠️ Speedtest failed: {result['message']}"
-                    self.log_message(error_message, log_type="both")
-                    self.master.after(0, lambda: messagebox.showwarning("Speedtest Failed", result['message']))
-            except Exception as e:
-                error_message = f"⚠️ Error during speedtest: {str(e)}"
-                self.log_message(error_message, log_type="both")
-                self.master.after(0, lambda: messagebox.showerror("Speedtest Error", str(e)))
-            finally:
-                # Re-enable speedtest button
-                if hasattr(self, 'speedtest_button'):
-                    self.master.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
-    
-    def show_about(self):
-        """Show about dialog"""
-        about_text = """Huawei Router Band Tool
-
-A tool for optimising band selection on Huawei CPE Pro 2 routers.
-
-Version: 1.0.2
-Author: Rare
-Licence: MIT"""
-        
-        messagebox.showinfo("About", about_text)
-
-    def show_donation_dialog(self):
-        """Show the donation dialog with PayPal button"""
-        # Create donation dialog
-        dialog = tk.Toplevel(self.master)
-        dialog.title("Support the Project")
-        dialog.geometry("400x300")
-        dialog.transient(self.master)
-        dialog.grab_set()
-        
-        # Add content
-        ttk.Label(dialog, text="Support the Project", font=("TkDefaultFont", 14, "bold")).pack(pady=10)
-        ttk.Label(dialog, text="If you find this tool helpful, please consider supporting its development.").pack(pady=5)
-        
-        # Create a text widget for the HTML content
-        html_frame = ttk.Frame(dialog)
-        html_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
-        # Use a label to show a "Click here to donate" message
-        donate_label = ttk.Label(
-            html_frame, 
-            text="Click here to donate via PayPal", 
-            cursor="hand2",
-            foreground="blue"
-        )
-        donate_label.pack(pady=10)
-        
-        def open_paypal(event=None):
-            webbrowser.open("https://www.paypal.com/ncp/payment/HLVZ82C6FKM2E")
-        
-        donate_label.bind("<Button-1>", open_paypal)
-        
-        # Add benefits text
-        benefits_text = """Your support helps:
-• Maintain and improve the application
-• Add new features and optimizations
-• Keep the project up to date
-• Provide better documentation and support"""
-        
-        ttk.Label(dialog, text=benefits_text, justify=tk.LEFT).pack(pady=10, padx=20)
-        
-        # Close button
-        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
 
     def update_band_selection_ui(self):
         """Update band selection UI based on available bands"""
         # Debug the available_bands structure
         print(f"Available bands: {self.available_bands}")
+        
+        # Clear existing band_vars (checkbox states) to ensure stale selections are removed
+        current_active_band = None
+        if hasattr(self, 'signal_info') and 'BAND' in self.signal_info:
+            current_active_band = self.signal_info['BAND'].get()
+            if current_active_band == "--" or current_active_band == "N/A":
+                current_active_band = None
+        
+        # Reset band variables - create a new dictionary
+        self.band_vars = {}
         
         # Process available bands to ensure consistent format
         processed_4g_bands = []
@@ -2257,9 +2213,12 @@ Licence: MIT"""
             for band_num in sorted_4g_bands:
                 band_name = f"B{band_num}"
                 
-                # Ensure the band variable exists
-                if band_name not in self.band_vars:
-                    self.band_vars[band_name] = tk.BooleanVar(value=False)
+                # Create unchecked checkbox variables by default
+                is_active = False
+                if current_active_band and band_name.upper() == current_active_band.upper():
+                    is_active = True
+                    
+                self.band_vars[band_name] = tk.BooleanVar(value=is_active)
                 
                 # Add checkbox
                 checkbox = ttk.Checkbutton(self.band_section_4g, text=band_name, 
@@ -2292,9 +2251,12 @@ Licence: MIT"""
             for band_num in sorted_5g_bands:
                 band_name = f"n{band_num}"
                 
-                # Ensure the band variable exists
-                if band_name not in self.band_vars:
-                    self.band_vars[band_name] = tk.BooleanVar(value=False)
+                # Create unchecked checkbox variables by default
+                is_active = False
+                if current_active_band and band_name.upper() == current_active_band.upper():
+                    is_active = True
+                    
+                self.band_vars[band_name] = tk.BooleanVar(value=is_active)
                 
                 # Add checkbox
                 checkbox = ttk.Checkbutton(self.band_section_5g, text=band_name, 
@@ -2312,45 +2274,286 @@ Licence: MIT"""
             # Buttons removed as requested
             
             self.log_message("Band selection updated with available bands", log_type="both")
+            
+            # If we have an active band, select it
+            if current_active_band:
+                self.select_active_band(current_active_band)
         else:
             self.log_message("Could not find band selection UI - please restart the application", log_type="both")
 
     def get_recent_speedtest_results(self):
-        # Return most recent speedtest results if available
-        if hasattr(self, 'latest_speedtest_results') and self.latest_speedtest_results:
-            return self.latest_speedtest_results
+        """Get the most recent speedtest results"""
+        if hasattr(self, 'recent_speedtest'):
+            return self.recent_speedtest
         return None
 
     def toggle_auto_refresh(self):
-        """Handle auto-refresh state change"""
-        new_state = self.auto_refresh.get()
-        
-        if new_state:
+        """Toggle auto-refresh of signal data"""
+        if self.auto_refresh.get():
             self.log_message("Auto-refresh enabled. Signal will update every 30 seconds.", log_type="both")
+            
+            # Start session keepalive mechanism
+            self.start_session_keepalive()
+            
+            # Don't start polling if not connected yet
             if self.is_connected:
-                try:
-                    self.refresh_signal()
-                    self.poll_status_task = self.master.after(30000, self.poll_status)
-                    self.log_message("Started polling task", log_type="detailed")
-                except Exception as e:
-                    self.log_message(f"Error starting auto-refresh: {str(e)}", log_type="both")
+                self.poll_status()
             else:
                 self.log_message("Auto-refresh will begin after connecting to router", log_type="both")
         else:
-            self.log_message("Auto-refresh disabled.", log_type="both")
+            self.log_message("Auto-refresh disabled", log_type="both")
+            # Cancel any existing poll task
             if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                try:
-                    self.master.after_cancel(self.poll_status_task)
-                    self.poll_status_task = None
-                    self.log_message("Cancelled polling task", log_type="detailed")
-                except Exception as e:
-                    self.log_message(f"Error cancelling poll task: {str(e)}", log_type="detailed")
+                self.master.after_cancel(self.poll_status_task)
+                self.poll_status_task = None
+                
+            # Cancel keepalive task
+            if hasattr(self, 'keepalive_task') and self.keepalive_task:
+                self.master.after_cancel(self.keepalive_task)
+                self.keepalive_task = None
+                
+    def refresh_signal(self):
+        """Refresh signal data"""
+        if hasattr(self, 'refresh_in_progress') and self.refresh_in_progress:
+            self.log_message("Refresh already in progress - skipping", log_type="detailed")
+            return
+            
+        # Set flag to prevent multiple refreshes
+        self.refresh_in_progress = True
         
-        # Save the configuration
+        # Start refresh in a background thread
+        self.log_message("Refreshing signal data...", log_type="detailed")
+        threading.Thread(target=self.refresh_thread, daemon=True).start()
+
+    def silent_reconnect(self, ip, username, password, use_api=True):
+        """Attempt to reconnect to the router silently"""
+        self.log_message(f"Silent reconnect attempt to {ip}... (API mode: {use_api})", log_type="detailed")
+        
+        # First, close any existing connections
+        if hasattr(self, 'client') and self.client:
+            try:
+                self.client.user.logout()
+            except:
+                pass
+            self.client = None
+                
+        if hasattr(self, 'session') and self.session:
+            try:
+                self.session.close()
+            except:
+                pass
+            self.session = None
+            self.token = None
+        
+        # Reset connection status
+        self.is_connected = False
+        
+        # Attempt to reconnect
         try:
-            self.save_config()
+            # Use the global login_to_router function
+            login_result = login_to_router(ip, username, password, use_api)
+            
+            if not login_result or not login_result[0]:
+                self.log_message(f"Silent reconnect failed to {ip}", log_type="both")
+                return False
+                
+            if use_api:
+                # Set the client from the login result
+                self.client = login_result[0]
+                self.session = None
+                self.token = None
+            else:
+                # Set the session and token from the login result
+                self.client = None
+                self.session = login_result[0]
+                self.token = login_result[1]
+                
+            # Update connection state
+            self.is_connected = True
+            self.connection_type = "API" if use_api else "Web"
+            self.reconnection_attempts = 0
+            self.last_session_activity = time.time()
+            self.session_timeout_detected = False
+            
+            # Reset polling if it was stopped
+            if not hasattr(self, 'polling_task') or not self.polling_task:
+                self.start_polling()
+                
+            # Ensure keepalive is active
+            self.start_session_keepalive()
+            
+            self.log_message(f"Silent reconnect successful to {ip} using {self.connection_type}", log_type="both")
+            return True
+            
         except Exception as e:
-            self.log_message(f"Error saving config: {str(e)}", log_type="detailed")
+            self.log_message(f"Silent reconnect error: {str(e)}", log_type="both")
+            # Increment reconnection attempts counter
+            if not hasattr(self, 'reconnection_attempts'):
+                self.reconnection_attempts = 0
+            self.reconnection_attempts += 1
+            
+            # Schedule another reconnection attempt if under the maximum attempts
+            if self.reconnection_attempts < 5:
+                self.log_message(f"Scheduling retry #{self.reconnection_attempts + 1} in 10 seconds...", log_type="detailed")
+                self.master.after(10000, lambda: self.silent_reconnect(ip, username, password, use_api))
+            else:
+                self.log_message("Maximum reconnection attempts reached. Please reconnect manually.", log_type="both")
+                # Reset the counter for next manual connection
+                self.reconnection_attempts = 0
+            return False
+
+    def start_session_keepalive(self):
+        """Start the session keepalive mechanism"""
+        # Initialize the last activity timestamp if not already set
+        if not hasattr(self, 'last_session_activity'):
+            self.last_session_activity = time.time()
+            
+        # Cancel any existing keepalive task
+        if hasattr(self, 'keepalive_task') and self.keepalive_task:
+            self.master.after_cancel(self.keepalive_task)
+        
+        # Schedule the keepalive function - run every 30 seconds instead of 60 seconds
+        self.keepalive_task = self.master.after(30000, self.session_keepalive)
+    
+    def session_keepalive(self):
+        """Function to keep the router session alive"""
+        try:
+            if not self.is_connected or not self.auto_refresh.get():
+                return
+            
+            current_time = time.time()
+            # Send a keepalive request every 2 minutes instead of 4 minutes
+            if hasattr(self, 'last_session_activity') and (current_time - self.last_session_activity) > 120:
+                self.log_message("Sending session keepalive request", log_type="detailed")
+                
+                # Use a lightweight request to keep the session alive
+                if hasattr(self, 'client') and self.client:
+                    # For API client
+                    try:
+                        # Just retrieve basic status info
+                        monitoring_status = self.client.monitoring.status()
+                        # Update last activity time
+                        self.last_session_activity = time.time()
+                        # Log success with device info
+                        device_name = monitoring_status.get('DeviceName', 'Unknown')
+                        self.log_message(f"Keepalive successful (API) - Device: {device_name}", log_type="detailed")
+                    except Exception as e:
+                        error_str = str(e)
+                        if "100003" in error_str or "No rights" in error_str or "needs login" in error_str:
+                            # Session already expired, attempt reconnection immediately
+                            self.log_message("Session expired during keepalive check. Reconnecting...", log_type="both")
+                            self.session_timeout_detected = True
+                            # Attempt reconnection
+                            if hasattr(self, 'username') and hasattr(self, 'password'):
+                                reconnect_result = self.silent_reconnect(
+                                    self.router_ip.get(), 
+                                    self.username.get(), 
+                                    self.password.get(), 
+                                    True)
+                                if reconnect_result:
+                                    self.log_message("Reconnected successfully during keepalive", log_type="both")
+                                else:
+                                    self.log_message("Failed to reconnect during keepalive", log_type="both")
+                        else:
+                            self.log_message(f"Keepalive request failed: {error_str}", log_type="detailed")
+                elif hasattr(self, 'session') and self.session:
+                    # For web session
+                    try:
+                        ip = self.router_ip.get()
+                        headers = {
+                            'Cookie': f'SessionID={self.token}',
+                            '__RequestVerificationToken': self.token
+                        }
+                        # Just get a basic status page
+                        response = self.session.get(f"http://{ip}/api/monitoring/status", headers=headers)
+                        if response.ok:
+                            self.last_session_activity = time.time()
+                            self.log_message("Keepalive successful (Web)", log_type="detailed")
+                        elif "100003" in response.text:
+                            # Session already expired, attempt reconnection immediately
+                            self.log_message("Session expired during keepalive check. Reconnecting...", log_type="both")
+                            self.session_timeout_detected = True
+                            # Attempt reconnection
+                            reconnect_result = self.silent_reconnect(
+                                self.router_ip.get(), 
+                                self.username.get(), 
+                                self.password.get(), 
+                                False)
+                            if reconnect_result:
+                                self.log_message("Reconnected successfully during keepalive", log_type="both")
+                            else:
+                                self.log_message("Failed to reconnect during keepalive", log_type="both")
+                        else:
+                            # Response not OK, but not session timeout - log it
+                            self.log_message(f"Keepalive request returned status {response.status_code}: {response.text[:100]}", log_type="detailed")
+                    except Exception as e:
+                        self.log_message(f"Keepalive request failed: {str(e)}", log_type="detailed")
+                        # Check if this is a connection error and attempt reconnection
+                        if "Connection" in str(e) or "Timeout" in str(e):
+                            self.log_message("Connection error during keepalive. Attempting reconnect...", log_type="both")
+                            reconnect_result = self.silent_reconnect(
+                                self.router_ip.get(), 
+                                self.username.get(), 
+                                self.password.get(), 
+                                False)
+                            if reconnect_result:
+                                self.log_message("Reconnected successfully after connection error", log_type="both")
+                else:
+                    # No valid client or session
+                    self.log_message("No valid connection found during keepalive. Attempting reconnect...", log_type="both")
+                    reconnect_result = self.silent_reconnect(
+                        self.router_ip.get(), 
+                        self.username.get(), 
+                        self.password.get(), 
+                        True) # Default to API mode for reconnect
+                    if reconnect_result:
+                        self.log_message("Reconnected successfully after missing connection", log_type="both")
+            else:
+                # Add a more frequent but lighter status check
+                if hasattr(self, 'client') and self.client:
+                    try:
+                        # Just check a very basic API endpoint to maintain activity
+                        self.client.device.basic_information()
+                        # Don't update last_session_activity here - we only track the full status checks
+                    except Exception as e:
+                        error_str = str(e)
+                        if "100003" in error_str or "No rights" in error_str or "needs login" in error_str:
+                            # Session already expired, attempt reconnection immediately
+                            self.log_message("Session expired during light check. Reconnecting...", log_type="detailed")
+                            self.session_timeout_detected = True
+                            # Attempt reconnection
+                            self.silent_reconnect(
+                                self.router_ip.get(), 
+                                self.username.get(), 
+                                self.password.get(), 
+                                True)
+                elif hasattr(self, 'session') and self.session:
+                    # Do a light check for web session too
+                    try:
+                        ip = self.router_ip.get()
+                        headers = {
+                            'Cookie': f'SessionID={self.token}',
+                            '__RequestVerificationToken': self.token
+                        }
+                        # Get a very lightweight endpoint
+                        response = self.session.get(f"http://{ip}/api/device/basic_information", headers=headers)
+                        if not response.ok and "100003" in response.text:
+                            # Session expired, reconnect
+                            self.log_message("Session expired during light web check. Reconnecting...", log_type="detailed")
+                            self.session_timeout_detected = True
+                            self.silent_reconnect(
+                                self.router_ip.get(), 
+                                self.username.get(), 
+                                self.password.get(), 
+                                False)
+                    except Exception:
+                        # Ignore errors in the light check
+                        pass
+        except Exception as e:
+            self.log_message(f"Error in keepalive: {str(e)}", log_type="detailed")
+        finally:
+            # Reschedule the keepalive - make it more frequent (30 seconds instead of 60)
+            self.keepalive_task = self.master.after(30000, self.session_keepalive)
     
     def poll_status(self):
         """Poll signal status at regular intervals"""
@@ -2366,9 +2569,67 @@ Licence: MIT"""
                 self.poll_status_task = None
                 return
             
+            # Add failure counter logic to prevent infinite retries
+            if not hasattr(self, 'poll_failure_count'):
+                self.poll_failure_count = 0
+                
+            # Check if session timeout was detected
+            if hasattr(self, 'session_timeout_detected') and self.session_timeout_detected:
+                self.log_message("Session timeout detected. Attempting auto-reconnect...", log_type="both")
+                reconnect_result = self.auto_reconnect()
+                if reconnect_result:
+                    self.session_timeout_detected = False
+                    self.poll_failure_count = 0
+                    self.log_message("Auto-reconnect successful", log_type="both")
+                else:
+                    self.log_message("Auto-reconnect failed", log_type="both")
+                    self.poll_failure_count += 1
+            
+            # Limit consecutive failures
+            if hasattr(self, 'poll_failure_count') and self.poll_failure_count >= 5:
+                error_message = "Auto-refresh disabled after 5 consecutive failures. The router may be unresponsive."
+                self.log_message(error_message, log_type="both")
+                self.auto_refresh.set(False)
+                
+                # Update error display in UI
+                self.master.after(0, lambda: self.error_display.config(text=error_message))
+                
+                # Show a notification
+                try:
+                    if NOTIFICATIONS_AVAILABLE:
+                        toaster = ToastNotifier()
+                        toaster.show_toast(
+                            "Auto-refresh Disabled",
+                            error_message,
+                            icon_path=None,
+                            duration=5,
+                            threaded=True
+                        )
+                except Exception:
+                    pass
+                
+                self.poll_status_task = None
+                return
+            
             # Refresh signal data
-            self.refresh_signal()
-            self.log_message("Auto-refreshed signal data", log_type="detailed")
+            try:
+                self.refresh_signal()
+                self.log_message("Auto-refreshed signal data", log_type="detailed")
+                # Reset failure counter on success
+                self.poll_failure_count = 0
+                # Also reset session timeout flag
+                if hasattr(self, 'session_timeout_detected'):
+                    self.session_timeout_detected = False
+            except Exception as e:
+                error_str = str(e)
+                # Check if this is a session timeout error
+                if "No rights" in error_str or "needs login" in error_str or "100003" in error_str or "login required" in error_str:
+                    self.log_message("Session timeout detected in polling, will attempt reconnect", log_type="detailed")
+                    self.session_timeout_detected = True
+                
+                # Increment failure counter
+                self.poll_failure_count += 1
+                self.log_message(f"Error in auto-refresh ({self.poll_failure_count}/5): {str(e)}", log_type="both")
             
         except Exception as e:
             self.log_message(f"Error in polling task: {str(e)}", log_type="both")
@@ -2377,167 +2638,73 @@ Licence: MIT"""
             # This ensures continuous polling as long as auto-refresh is enabled
             if self.is_connected and self.auto_refresh.get():
                 try:
-                    self.poll_status_task = self.master.after(30000, self.poll_status)
-                    self.log_message("Scheduled next poll", log_type="detailed")
+                    # Use a shorter interval if we're waiting for reconnection
+                    interval = 5000 if hasattr(self, 'session_timeout_detected') and self.session_timeout_detected else self.signal_update_interval
+                    self.poll_status_task = self.master.after(interval, self.poll_status)
+                    self.log_message(f"Scheduled next poll in {interval/1000} seconds", log_type="detailed")
                 except Exception as e:
                     self.log_message(f"Error scheduling next poll: {str(e)}", log_type="detailed")
             else:
                 self.poll_status_task = None
     
-    def check_band_lock(self):
-        """Check if current band matches user selection and reapply if needed"""
-        try:
-            # Get current selected bands from UI
-            selected_bands = []
-            for band, var in self.band_vars.items():
-                if var.get():
-                    selected_bands.append(band)
-            
-            if not selected_bands:
-                return  # No bands selected to monitor
-                
-            # Get current band from signal info
-            current_band = self.signal_info['BAND'].get() if 'BAND' in self.signal_info else ""
-            if not current_band:
-                return  # No current band info
-                
-            # Extract band numbers from current_band (e.g., "B7" -> ["B7"])
-            # For carrier aggregation like "B7+B3", it would be ["B7", "B3"]
-            current_bands = []
-            if "+" in current_band:
-                current_bands = [b.strip() for b in current_band.split("+")]
-            else:
-                current_bands = [current_band.strip()]
-                
-            # Check if any selected band is in the current bands list
-            selected_band_names = [band for band in selected_bands]
-            
-            # Get the list of currently active bands
-            active_bands = []
-            for band in current_bands:
-                # Remove any prefixes like "BAND" or "B" to get just the number
-                if "-" in band:
-                    band = band.split("-")[0].strip()
-                
-                if band.lower().startswith("band"):
-                    band = "B" + band[4:].strip()
-                elif not band.upper().startswith("B") and not band.lower().startswith("n"):
-                    band = "B" + band.strip()
-                    
-                active_bands.append(band.upper())
-            
-            # Check if at least one of our selected bands is active
-            if not any(band in active_bands for band in selected_band_names):
-                message = f"Band lock verification failed. Selected: {', '.join(selected_band_names)}, Active: {', '.join(active_bands)}"
-                self.log_message(f"⚠️ {message}", log_type="both")
-                self.log_message("🔄 Reapplying band lock...", log_type="both")
-                
-                # Show message box
-                messagebox.showwarning("Band Lock Failed", message + "\n\nAttempting to reapply band lock...")
-                
-                # Show windows notification
-                try:
-                    toaster = ToastNotifier()
-                    toaster.show_toast(
-                        "Huawei Band Scanner",
-                        message,
-                        icon_path=None,
-                        duration=5,
-                        threaded=True
-                    )
-                except Exception as e:
-                    self.log_message(f"Failed to show notification: {str(e)}", log_type="detailed")
-                
-                # Run in background thread to reapply bands
-                def reapply_thread():
-                    try:
-                        success = apply_band_lock(
-                            self.session or self.client,
-                            self.router_ip.get(),
-                            self.token,
-                            selected_bands
-                        )
-                        
-                        if success:
-                            self.master.after(0, lambda: self.log_message("✅ Band lock reapplied successfully", log_type="both"))
-                            self.master.after(5000, self.refresh_signal)
-                            
-                            # Show success notification
-                            try:
-                                toaster = ToastNotifier()
-                                toaster.show_toast(
-                                    "Huawei Band Scanner",
-                                    "Band lock successfully reapplied",
-                                    icon_path=None,
-                                    duration=3,
-                                    threaded=True
-                                )
-                            except Exception as e:
-                                pass  # Silently ignore notification errors
-                        else:
-                            error_message = "Failed to reapply band lock"
-                            self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-                            self.master.after(0, lambda: messagebox.showerror("Band Lock Error", error_message))
-                    except Exception as e:
-                        error_message = f"Error reapplying band lock: {str(e)}"
-                        self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-                        self.master.after(0, lambda: messagebox.showerror("Band Lock Error", error_message))
-                
-                threading.Thread(target=reapply_thread, daemon=True).start()
-        except Exception as e:
-            error_message = f"Error in band monitoring: {str(e)}"
-            self.log_message(error_message, log_type="detailed")
-            # For critical band monitoring errors, show to user
-            messagebox.showerror("Band Monitoring Error", error_message)
-
-    def apply_band_selection(self):
-        """Apply band selection to router"""
-        selected_bands = []
-        
-        for band, var in self.band_vars.items():
-            if var.get():
-                selected_bands.append(band)
-        
-        if not selected_bands:
-            self.log_message("No bands selected.", log_type="both")
-            messagebox.showwarning("Band Selection", "No bands selected. Please select at least one band.")
-            if hasattr(self, 'apply_bands_button'):
-                self.apply_bands_button.config(state=tk.NORMAL)
+    def start_speedtest(self):
+        """Run a speed test and display the results"""
+        if not hasattr(self, 'is_connected') or not self.is_connected:
+            self.log_message("Cannot run speedtest: Not connected to router", log_type="both")
+            messagebox.showwarning("Not Connected", "Please connect to the router first.")
             return
         
-        # Store the selected bands for monitoring
-        self.last_applied_bands = selected_bands.copy()
+        # Disable the speedtest button while running
+        if hasattr(self, 'speedtest_button'):
+            self.speedtest_button.config(state=tk.DISABLED)
         
-        band_list = ", ".join(selected_bands)
-        self.log_message(f"Applying band selection: {band_list}...", log_type="both")
+        self.log_message("Starting speed test. This may take a minute...", log_type="both")
         
-        # Run in background thread to keep UI responsive
-        def apply_thread():
+        # Run in a separate thread to prevent UI freezing
+        def speedtest_thread():
             try:
-                success = apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, selected_bands)
+                # Run the speedtest
+                result = run_speedtest()
                 
-                if success:
-                    self.master.after(0, lambda: self.log_message(
-                        f"✅ Band selection applied successfully: {band_list}", log_type="both"))
-                    self.master.after(5000, self.refresh_signal)
+                if result["success"]:
+                    # Format the results
+                    download = result["download"]
+                    upload = result["upload"]
+                    ping = result["ping"]
+                    
+                    # Store results for future reference
+                    self.recent_speedtest = result
+                    
+                    # Update UI with results
+                    success_message = f"✅ Speed test complete: ⬇️ {download:.2f} Mbps | ⬆️ {upload:.2f} Mbps | Ping: {ping} ms"
+                    self.master.after(0, lambda: self.log_message(success_message, log_type="both"))
+                    
+                    # Show a result dialog
+                    self.master.after(0, lambda: messagebox.showinfo("Speed Test Results", 
+                        f"Download: {download:.2f} Mbps\nUpload: {upload:.2f} Mbps\nPing: {ping} ms"))
+                    
+                    # Update signal info if available
+                    if hasattr(self, 'signal_info') and 'DOWNLOAD' in self.signal_info and 'UPLOAD' in self.signal_info:
+                        self.master.after(0, lambda: self.signal_info['DOWNLOAD'].set(f"{download:.2f} Mbps"))
+                        self.master.after(0, lambda: self.signal_info['UPLOAD'].set(f"{upload:.2f} Mbps"))
                 else:
-                    error_message = f"Failed to apply band selection: {band_list}"
-                    self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-                    self.master.after(0, lambda: messagebox.showerror("Band Selection Error", error_message))
-            except Exception as e:
-                error_message = f"Error applying band selection: {str(e)}"
-                self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
-                self.master.after(0, lambda: messagebox.showerror("Band Selection Error", error_message))
-            finally:
-                if hasattr(self, 'apply_bands_button'):
-                    self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
-        
-        # Disable the apply button while applying
-        if hasattr(self, 'apply_bands_button'):
-            self.apply_bands_button.config(state=tk.DISABLED)
+                    error_message = f"❌ Speed test failed: {result.get('error', 'Unknown error')}"
+                    self.master.after(0, lambda: self.log_message(error_message, log_type="both"))
+                    self.master.after(0, lambda: messagebox.showerror("Speed Test Failed", error_message))
             
-        threading.Thread(target=apply_thread, daemon=True).start()
-
+            except Exception as e:
+                error_message = f"Speed test error: {str(e)}"
+                self.master.after(0, lambda: self.log_message(f"❌ {error_message}", log_type="both"))
+                self.master.after(0, lambda: messagebox.showerror("Speed Test Error", error_message))
+            
+            finally:
+                # Re-enable the speedtest button
+                if hasattr(self, 'speedtest_button'):
+                    self.master.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
+        
+        # Start the thread
+        threading.Thread(target=speedtest_thread, daemon=True).start()
+    
     def apply_network_config(self):
         """Apply network aggregation configuration"""
         # Implementation will be added here
@@ -2548,7 +2715,7 @@ Licence: MIT"""
         # Implementation will be added here
         pass
 
-    def toggle_all_bands(self, state, band_type):
+    def toggle_all_bands(self, state, band_type="all"):
         """Toggle all bands of a specific type (4G or 5G) to the given state"""
         try:
             # Process available bands to ensure consistent format
@@ -2556,65 +2723,94 @@ Licence: MIT"""
             processed_5g_bands = []
             
             # Process 4G bands
-            for band in self.available_bands["4G"]:
-                if isinstance(band, str):
-                    if band.startswith('B'):
-                        # Extract numeric part
-                        try:
-                            band_num = int(band[1:])
-                            processed_4g_bands.append(band_num)
-                        except ValueError:
-                            # Skip invalid bands
-                            continue
-                    else:
-                        # Try to convert to int
-                        try:
-                            band_num = int(band)
-                            processed_4g_bands.append(band_num)
-                        except ValueError:
-                            # Skip invalid bands
-                            continue
-                else:
-                    # Already a number
+            for band in self.available_bands.get("4G", []):
+                if isinstance(band, str) and band.startswith("B"):
                     processed_4g_bands.append(band)
+                elif isinstance(band, int) or (isinstance(band, str) and band.isdigit()):
+                    processed_4g_bands.append(f"B{band}")
             
             # Process 5G bands
-            for band in self.available_bands["5G"]:
-                if isinstance(band, str):
-                    if band.startswith('n'):
-                        # Extract numeric part
-                        try:
-                            band_num = int(band[1:])
-                            processed_5g_bands.append(band_num)
-                        except ValueError:
-                            # Skip invalid bands
-                            continue
-                    else:
-                        # Try to convert to int
-                        try:
-                            band_num = int(band)
-                            processed_5g_bands.append(band_num)
-                        except ValueError:
-                            # Skip invalid bands
-                            continue
-                else:
-                    # Already a number
+            for band in self.available_bands.get("5G", []):
+                if isinstance(band, str) and band.startswith("n"):
                     processed_5g_bands.append(band)
+                elif isinstance(band, int) or (isinstance(band, str) and band.isdigit()):
+                    processed_5g_bands.append(f"n{band}")
             
-            # Set bands based on band type
-            if band_type == "4G":
-                band_names = [f"B{b}" for b in processed_4g_bands]
-            else:  # 5G
-                band_names = [f"n{b}" for b in processed_5g_bands]
+            # Update checkboxes based on the band type
+            if band_type == "all" or band_type == "4G":
+                for band in processed_4g_bands:
+                    if band in self.band_vars:
+                        self.band_vars[band].set(state)
             
-            # Set all bands of the specified type to the given state
-            for band_name in band_names:
-                if band_name in self.band_vars:
-                    self.band_vars[band_name].set(state)
+            if band_type == "all" or band_type == "5G":
+                for band in processed_5g_bands:
+                    if band in self.band_vars:
+                        self.band_vars[band].set(state)
+                        
+            self.log_message(f"{'Selected' if state else 'Cleared'} all {band_type} bands", log_type="both")
             
-            self.log_message(f"Set all {band_type} bands to {state}", log_type="both")
         except Exception as e:
             self.log_message(f"Error toggling bands: {str(e)}", log_type="both")
+            
+    def apply_band_selection(self):
+        """Apply the currently selected bands to the router"""
+        if not hasattr(self, 'is_connected') or not self.is_connected:
+            self.log_message("⚠️ Not connected to router. Cannot apply band selection.", log_type="both")
+            return
+            
+        # Disable apply button while working
+        if hasattr(self, 'apply_bands_button'):
+            self.apply_bands_button.config(state=tk.DISABLED)
+            
+        try:
+            # Collect selected bands
+            selected_bands = []
+            for band, var in self.band_vars.items():
+                if var.get():
+                    selected_bands.append(band)
+                    
+            if not selected_bands:
+                self.log_message("⚠️ No bands selected. Please select at least one band.", log_type="both")
+                if hasattr(self, 'apply_bands_button'):
+                    self.apply_bands_button.config(state=tk.NORMAL)
+                return
+                
+            self.log_message(f"🔄 Applying band selection: {', '.join(selected_bands)}", log_type="both")
+            
+            # Start the apply operation in a background thread
+            threading.Thread(target=lambda: self.apply_band_thread(selected_bands), daemon=True).start()
+            
+        except Exception as e:
+            self.log_message(f"❌ Error preparing band selection: {str(e)}", log_type="both")
+            if hasattr(self, 'apply_bands_button'):
+                self.apply_bands_button.config(state=tk.NORMAL)
+                
+    def apply_band_thread(self, selected_bands):
+        """Background thread for applying band selection"""
+        try:
+            # Apply the band lock
+            apply_band_lock(
+                self.session or self.client,
+                self.router_ip.get(),
+                self.token,
+                selected_bands
+            )
+            
+            # Update UI on success
+            self.master.after(0, lambda: self.log_message("✅ Band selection applied successfully!", log_type="both"))
+            
+            # Refresh signal after a short delay
+            self.master.after(5000, self.refresh_signal)
+            
+        except Exception as e:
+            # Handle errors
+            error_message = f"❌ Error applying band selection: {str(e)}"
+            self.master.after(0, lambda: self.log_message(error_message, log_type="both"))
+            
+        finally:
+            # Re-enable the apply button
+            if hasattr(self, 'apply_bands_button'):
+                self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
 
     def optimise(self):
         """Optimise band selection based on signal strength"""
@@ -2672,7 +2868,8 @@ Licence: MIT"""
                             continue
                     
                     # Wait for connection to stabilize
-                    time.sleep(12)
+                    # Increased from 5 to 10 seconds for better 5G stabilization
+                    time.sleep(10)
                     
                     # Refresh signal data
                     try:
@@ -2692,6 +2889,43 @@ Licence: MIT"""
                         self.log_message(f"❌ Error getting signal data: {str(e)}", log_type="both")
                         results[band] = {"score": 0, "rsrp": None, "sinr": None, "failed": True}
                         continue
+                    
+                    # Extract RSRP value
+                    try:
+                        rsrp_str = signal_data.get("rsrp", "-120 dBm")
+                        if isinstance(rsrp_str, str) and "dBm" in rsrp_str:
+                            rsrp_str = rsrp_str.replace("dBm", "").strip()
+                        rsrp = float(rsrp_str)
+                    except (ValueError, TypeError):
+                        rsrp = -120  # Default to very weak signal
+                    
+                    # Extract SINR value
+                    try:
+                        sinr_str = signal_data.get("sinr", "0 dB")
+                        if isinstance(sinr_str, str) and "dB" in sinr_str:
+                            sinr_str = sinr_str.replace("dB", "").strip()
+                        sinr = float(sinr_str)
+                    except (ValueError, TypeError):
+                        sinr = 0  # Default to neutral SINR
+                    
+                    # Calculate score (weighted average of normalized RSRP and SINR)
+                    # RSRP typically ranges from -120 (poor) to -70 (excellent)
+                    # SINR typically ranges from -10 (poor) to 20 (excellent)
+                    rsrp_norm = max(0, min(100, (rsrp + 120) / 50 * 100))
+                    sinr_norm = max(0, min(100, (sinr + 10) / 30 * 100))
+                    score = 0.7 * rsrp_norm + 0.3 * sinr_norm
+                    
+                    # Store results
+                    results[band] = {
+                        "score": score,
+                        "rsrp": rsrp,
+                        "sinr": sinr
+                    }
+                    
+                    self.log_message(f"Band {band}: RSRP={rsrp} dBm, SINR={sinr} dB, Score={score:.1f}", log_type="detailed")
+                    
+                    successful_tests += 1
+                    self.log_message(f"✅ Tested {successful_tests}/{len(bands_to_test)} bands", log_type="standard")
                 
                 # Find top bands
                 sorted_bands = sorted(results.items(), key=lambda x: x[1]["score"], reverse=True)
@@ -2702,6 +2936,9 @@ Licence: MIT"""
                     self.log_message(error_message, log_type="both")
                     self.master.after(0, lambda: messagebox.showwarning("Optimization Failed", error_message))
                     return
+                
+                # Generate report
+                report_path = generate_report(results, optimisation_type="basic")
                 
                 # Show optimisation summary dialogue
                 self.master.after(0, lambda: self.show_optimisation_summary(top_bands, results, report_path))
@@ -2766,6 +3003,12 @@ Licence: MIT"""
             results_4g = {}
             results_5g = {}
             
+            # Initialize recommended results dictionary
+            self.recommended_results = {
+                '4G': {'bands': [], 'score': 0, 'metrics': {}},
+                '5G': {'bands': [], 'score': 0, 'metrics': {}}
+            }
+            
             # Test each band one by one - use available bands
             self.log_message("🔄 Testing 4G bands...", log_type="both")
             for band in self.available_bands["4G"]:
@@ -2779,8 +3022,8 @@ Licence: MIT"""
                         [band]
                     )
                     
-                    # Wait for band to stabilize
-                    time.sleep(12)
+                    # Wait for band to stabilize - increased to 10 seconds for better stability
+                    time.sleep(10)
                     
                     # Get signal metrics
                     signal_data = fetch_signal_data(
@@ -2840,25 +3083,33 @@ Licence: MIT"""
                         "sinr": sinr_float,
                         "download": download,
                         "upload": upload,
-                        "ping": ping,
-                        "failed": False
+                        "ping": ping
                     }
                     
-                    # Show result in log
-                    self.log_message(
-                        f"📊 Band {band}: RSRP {rsrp_float} dBm, SINR {sinr_float} dB, "
-                        f"Score: {final_score:.1f}" + 
-                        (f", Speed: {speedtest_result['download']:.1f}/{speedtest_result['upload']:.1f} Mbps" 
-                         if speedtest_result["success"] else ""),
-                        log_type="both"
-                    )
+                    self.log_message(f"Band {band}: RSRP={rsrp_float} dBm, SINR={sinr_float} dB, Score={final_score:.1f}", log_type="detailed")
                     
                 except Exception as e:
                     error_message = f"Error testing band {band}: {str(e)}"
                     self.log_message(error_message, log_type="both")
                     continue
             
-            # Test 5G bands if supported
+            # Find best 4G band
+            if results_4g:
+                sorted_4g = sorted(results_4g.items(), key=lambda x: x[1]["score"], reverse=True)
+                best_4g_band = sorted_4g[0][0] if sorted_4g else None
+                
+                if best_4g_band:
+                    self.recommended_results['4G']['bands'] = [best_4g_band]
+                    self.recommended_results['4G']['score'] = results_4g[best_4g_band]["score"]
+                    self.recommended_results['4G']['metrics'] = {
+                        "rsrp": results_4g[best_4g_band]["rsrp"],
+                        "sinr": results_4g[best_4g_band]["sinr"],
+                        "download": results_4g[best_4g_band]["download"],
+                        "upload": results_4g[best_4g_band]["upload"],
+                        "ping": results_4g[best_4g_band]["ping"]
+                    }
+            
+            # Test 5G bands
             self.log_message("🔄 Testing 5G bands...", log_type="both")
             for band in self.available_bands["5G"]:
                 try:
@@ -2873,8 +3124,8 @@ Licence: MIT"""
                         self.log_message(f"Failed to apply band {band}, skipping", log_type="both")
                         continue
                     
-                    # Wait for band to stabilize
-                    time.sleep(12)
+                    # Wait for band to stabilize - increased to 10 seconds for better 5G stability
+                    time.sleep(10)
                     
                     # Get signal metrics
                     signal_data = fetch_signal_data(
@@ -2891,82 +3142,110 @@ Licence: MIT"""
                     # Run speedtest
                     speedtest_result = run_speedtest()
                     
-                    # Process and store results in a similar way to 4G bands
-                    # Would need to add this code here
-                
+                    # Extract signal metrics
+                    rsrp_str = signal_data.get("rsrp", "-120 dBm")
+                    if isinstance(rsrp_str, str) and "dBm" in rsrp_str:
+                        rsrp_str = rsrp_str.replace("dBm", "").strip()
+                    rsrp_float = float(rsrp_str)
+                    
+                    sinr_str = signal_data.get("sinr", "0 dB")
+                    if isinstance(sinr_str, str) and "dB" in sinr_str:
+                        sinr_str = sinr_str.replace("dB", "").strip()
+                    sinr_float = float(sinr_str)
+                    
+                    # Store speed test results if successful
+                    if speedtest_result["success"]:
+                        download = speedtest_result["download"]
+                        upload = speedtest_result["upload"]
+                        ping = speedtest_result["ping"]
+                    else:
+                        download = 0
+                        upload = 0
+                        ping = 999
+                    
+                    # Calculate enhanced score with speed test results
+                    rsrp_norm = max(0, min(100, (rsrp_float + 140) / 96 * 100))
+                    sinr_norm = max(0, min(100, (sinr_float + 20) / 50 * 100))
+                    signal_score = 0.6 * rsrp_norm + 0.4 * sinr_norm
+                    
+                    # Adjust for 5G - we value speed more for 5G
+                    download_norm = min(100, download / 2.0) if download > 0 else 0  # Normalize to 200 Mbps
+                    upload_norm = min(100, upload / 1.0) if upload > 0 else 0  # Normalize to 100 Mbps
+                    speed_score = 0.7 * download_norm + 0.3 * upload_norm
+                    
+                    # 5G scoring: 30% signal quality, 70% speed
+                    final_score = 0.3 * signal_score + 0.7 * speed_score
+                    
+                    # Store results
+                    results_5g[band] = {
+                        "score": final_score,
+                        "rsrp": rsrp_float,
+                        "sinr": sinr_float,
+                        "download": download,
+                        "upload": upload,
+                        "ping": ping
+                    }
+                    
+                    self.log_message(f"5G Band {band}: RSRP={rsrp_float} dBm, SINR={sinr_float} dB, Score={final_score:.1f}", log_type="detailed")
+                    
                 except Exception as e:
                     error_message = f"Error testing 5G band {band}: {str(e)}"
                     self.log_message(error_message, log_type="both")
                     continue
             
-            # Find best combinations
-            # Generate report
+            # Find best 5G band
+            if results_5g:
+                sorted_5g = sorted(results_5g.items(), key=lambda x: x[1]["score"], reverse=True)
+                best_5g_band = sorted_5g[0][0] if sorted_5g else None
+                
+                if best_5g_band:
+                    self.recommended_results['5G']['bands'] = [best_5g_band]
+                    self.recommended_results['5G']['score'] = results_5g[best_5g_band]["score"]
+                    self.recommended_results['5G']['metrics'] = {
+                        "rsrp": results_5g[best_5g_band]["rsrp"],
+                        "sinr": results_5g[best_5g_band]["sinr"],
+                        "download": results_5g[best_5g_band]["download"],
+                        "upload": results_5g[best_5g_band]["upload"],
+                        "ping": results_5g[best_5g_band]["ping"]
+                    }
+            
+            # Generate report with both 4G and 5G results
             report_path = generate_report({
                 '4G_results': results_4g,
                 '5G_results': results_5g,
-                'recommended': recommended_results
+                'recommended': self.recommended_results
             }, optimisation_type="enhanced")
             
-            # Show results summary
+            # Display report
             self.master.after(0, lambda: self.show_enhanced_optimisation_summary(
-                results_4g, results_5g, recommended_results, report_path
-            ))
+                results_4g, results_5g, self.recommended_results, report_path))
             
             # Play notification sound
             self.master.bell()
             
         except Exception as e:
-            self.log_message(f"Enhanced optimisation error: {str(e)}", log_type="both")
-            # Attempt to restore original bands
+            error_message = f"Enhanced optimisation error: {str(e)}"
+            self.log_message(error_message, log_type="both")
+            self.master.after(0, lambda: messagebox.showerror("Optimization Error", error_message))
+            
+            # Try to restore the original band configuration
             try:
                 if original_band_config:
-                    self.log_message(f"Restoring original band configuration: {', '.join(original_band_config)}", log_type="detailed")
+                    self.log_message(f"Attempting to restore original bands: {', '.join(original_band_config)}", log_type="both")
                     apply_band_lock(self.session or self.client, self.router_ip.get(), self.token, original_band_config)
             except Exception as restore_error:
-                self.log_message(f"Failed to restore original bands: {str(restore_error)}", log_type="both")
+                restore_error_message = f"Failed to restore original bands: {str(restore_error)}"
+                self.log_message(restore_error_message, log_type="both")
+                self.master.after(0, lambda: messagebox.showerror("Restoration Error", restore_error_message))
+            
         finally:
-            # Re-enable buttons when done
+            # Re-enable optimization buttons
             if hasattr(self, 'optimise_button'):
                 self.master.after(0, lambda: self.optimise_button.config(state=tk.NORMAL))
             if hasattr(self, 'enhanced_optimise_button'):
                 self.master.after(0, lambda: self.enhanced_optimise_button.config(state=tk.NORMAL))
             if hasattr(self, 'speedtest_button'):
                 self.master.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
-
-    def apply_thread(self):
-        try:
-            # Collect selected bands
-            selected_bands = {
-                "4G": [band for band, var in self.band_vars_4g.items() if var.get()],
-                "5G": [band for band, var in self.band_vars_5g.items() if var.get()]
-            }
-            
-            # Add required verification
-            if len(selected_bands["4G"]) == 0 and len(selected_bands["5G"]) == 0:
-                self.master.after(0, lambda: self.log_message("Please select at least one band", log_type="error"))
-                self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
-                return
-            
-            bands_list = selected_bands["4G"] + selected_bands["5G"]
-            # Log the bands being applied
-            bands_str = ", ".join(bands_list)
-            self.master.after(0, lambda: self.log_message(f"Applying band selection: {bands_str}...", log_type="both"))
-            
-            # Apply band lock
-            apply_band_lock(self.session, self.router_ip, self.token, selected_bands)
-            
-            # Update UI on success
-            self.master.after(0, lambda: self.log_message("Band selection applied successfully. Changes may take up to 30 seconds to take effect.", log_type="both"))
-            self.master.after(3000, self.refresh_signal)  # Refresh signal after 3 seconds
-        except Exception as e:
-            # Log error and re-enable button
-            err_msg = f"Failed to apply band selection: {str(e)}"
-            print(err_msg)
-            self.master.after(0, lambda: self.log_message(err_msg, log_type="error"))
-            messagebox.showerror("Band Selection Error", err_msg)
-        finally:
-            # Re-enable the apply button
-            self.master.after(0, lambda: self.apply_bands_button.config(state=tk.NORMAL))
 
     def save_config(self):
         """Save configuration to file"""
@@ -2979,6 +3258,9 @@ Licence: MIT"""
             "monitor_bands": self.monitor_bands.get(),
             "minimize_to_tray": self.minimize_to_tray.get(),
             "auto_connect": self.auto_connect.get(),
+            "use_api_lib": self.use_api_lib.get(),
+            "run_speed_on_start": self.run_speed_on_start.get(),
+            "notify_on_signal_change": self.notify_on_signal_change.get(),
             "selected_bands": [band for band, var in self.band_vars.items() if var.get()]
         }
         
@@ -2989,6 +3271,42 @@ Licence: MIT"""
             self.log_message("Configuration saved", log_type="detailed")
         except Exception as e:
             self.log_message(f"Failed to save configuration: {str(e)}", log_type="detailed")
+            
+    def show_donation_dialog(self):
+        """Show a dialog with donation information"""
+        try:
+            donation_text = "If you find this tool helpful, please consider supporting its development.\n\n"
+            donation_text += "PayPal: donate@example.com\n"
+            donation_text += "BTC: bc1qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            donation_text += "ETH: 0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n"
+            donation_text += "Thank you for your support!"
+            
+            # Create a custom dialog
+            dialog = tk.Toplevel(self.master)
+            dialog.title("Support Development")
+            dialog.geometry("400x300")
+            dialog.resizable(False, False)
+            dialog.transient(self.master)
+            dialog.grab_set()
+            
+            # Add content
+            ttk.Label(dialog, text="Support Development", font=("", 12, "bold")).pack(pady=10)
+            
+            message = ttk.Label(dialog, text=donation_text, wraplength=380, justify=tk.CENTER)
+            message.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
+            
+            # Add close button
+            close_button = ttk.Button(dialog, text="Close", command=dialog.destroy)
+            close_button.pack(pady=10)
+            
+            # Center the dialog on the parent window
+            dialog.update_idletasks()
+            x = self.master.winfo_x() + (self.master.winfo_width() - dialog.winfo_width()) // 2
+            y = self.master.winfo_y() + (self.master.winfo_height() - dialog.winfo_height()) // 2
+            dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+            
+        except Exception as e:
+            self.log_message(f"Error showing donation dialog: {str(e)}", log_type="both")
 
     def setup_tray_icon(self):
         """Setup system tray icon and menu"""
@@ -3113,6 +3431,531 @@ Licence: MIT"""
             # Force exit if cleanup fails
             import sys
             sys.exit(0)
+
+    def refresh_thread(self):
+        """Background thread for refreshing signal data"""
+        try:
+            # Check if we need to reconnect
+            if not hasattr(self, 'client') or self.client is None:
+                self.log_message("Client is None, attempting silent reconnect", log_type="detailed")
+                silent_reconnect_success = self.silent_reconnect(
+                    self.router_ip.get(), 
+                    self.username.get(), 
+                    self.password.get(), 
+                    getattr(self, 'use_api_value', True))
+                
+                if not silent_reconnect_success:
+                    self.log_message("Silent reconnect failed, cannot refresh signal", log_type="both")
+                    self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'})
+                    self.refresh_in_progress = False
+                    return
+            
+            # Log session info before attempting to fetch data
+            self.log_message("Attempting to fetch signal data with current session", log_type="detailed")
+            
+            # Fetch signal data using the standalone function
+            signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
+            
+            # If we got an empty result or session timeout was detected, try to reconnect
+            if not signal_data or hasattr(self, 'session_timeout_detected') and self.session_timeout_detected:
+                self.log_message("Session timeout detected or empty signal data, attempting to reconnect", log_type="detailed")
+                # Reset the flag
+                if hasattr(self, 'session_timeout_detected'):
+                    self.session_timeout_detected = False
+                
+                # Try to reconnect
+                silent_reconnect_success = self.silent_reconnect(
+                    self.router_ip.get(), 
+                    self.username.get(), 
+                    self.password.get(), 
+                    getattr(self, 'use_api_value', True))
+                
+                if silent_reconnect_success:
+                    # Try again with the new connection
+                    signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
+            
+            # Update UI with the fetched data
+            if signal_data:
+                # Schedule UI update on the main thread
+                self.master.after(0, lambda: self.update_signal_ui(signal_data))
+            else:
+                self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
+                
+        except Exception as e:
+            self.log_message(f"Error in refresh thread: {str(e)}", log_type="both")
+            self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
+        finally:
+            # Reset the flag when done
+            self.refresh_in_progress = False
+
+    def update_signal_ui(self, signal_data):
+        """Update UI with signal data"""
+        # Define mapping between signal_data keys and display keys
+        key_mapping = {
+            'rsrp': 'RSRP',
+            'rsrq': 'RSRQ',
+            'sinr': 'SINR',
+            'band': 'BAND',
+            'primary_band': 'PRIMARY_BAND',
+            'mode': 'NETWORK_TYPE',
+            'plmn_name': 'CARRIER',
+            # Removing download/upload from auto-updating - these will only be updated by speed tests
+            # 'download': 'DOWNLOAD',
+            # 'upload': 'UPLOAD'
+        }
+        
+        # Debug log received signal data
+        self.log_message(f"Raw signal data received: {signal_data}", log_type="detailed")
+        
+        # Process each key
+        for data_key, ui_key in key_mapping.items():
+            if data_key in signal_data and ui_key in self.signal_info:
+                # For network_type, convert numeric codes to user-friendly text
+                if data_key == 'mode' and signal_data[data_key]:
+                    mode_val = signal_data[data_key]
+                    
+                    # Convert numeric codes to user-friendly text
+                    if mode_val == '101':
+                        display_value = '5G NSA'
+                    elif mode_val == '38':
+                        display_value = 'NR/5G'
+                    elif mode_val == '7':
+                        display_value = '4G'
+                    elif mode_val == '1011':
+                        display_value = '4G+'
+                    else:
+                        # Try to make other network types user-friendly
+                        network_types = {
+                            "0": "No Service", "1": "GSM", "2": "GPRS", "3": "EDGE", "4": "WCDMA",
+                            "5": "HSDPA", "6": "HSUPA", "7": "4G", "8": "TD-SCDMA", "9": "HSPA+",
+                            "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA"
+                        }
+                        display_value = network_types.get(str(mode_val), mode_val)
+                    
+                    self.signal_info[ui_key].set(display_value)
+                # Special handling for band to show all bands when available
+                elif data_key == 'band' and ui_key == 'BAND':
+                    # Use primary band or current band
+                    display_value = signal_data[data_key]
+                    
+                    # Handle empty or null values
+                    if display_value is None or display_value == '' or display_value == '--':
+                        display_value = 'N/A'
+                    
+                    # If we have the 'bands' field with multiple bands, use it instead
+                    if 'bands' in signal_data and signal_data['bands'] and signal_data['bands'] != '--':
+                        # Display all bands instead of just the primary one
+                        display_value = signal_data['bands']
+                    
+                    self.signal_info[ui_key].set(display_value)
+                    
+                    # For band, ensure we check all active bands in the UI
+                    if display_value != 'N/A' and display_value != '--':
+                        # If we have multiple bands, check them all in the UI
+                        if 'bands' in signal_data and signal_data['bands']:
+                            # Use all bands for the checkboxes
+                            self.select_active_band(signal_data['bands'])
+                        else:
+                            # Otherwise just use the primary band
+                            primary_band = signal_data.get('primary_band', signal_data['band']) 
+                            self.select_active_band(primary_band)
+                # Special handling for primary band display
+                elif data_key == 'primary_band' and ui_key == 'PRIMARY_BAND':
+                    display_value = signal_data[data_key]
+                    
+                    # Handle empty or null values
+                    if display_value is None or display_value == '' or display_value == '--':
+                        # Fall back to the regular band field if primary is not set
+                        display_value = signal_data.get('band', 'N/A')
+                        if display_value is None or display_value == '' or display_value == '--':
+                            display_value = 'N/A'
+                    
+                    self.signal_info[ui_key].set(display_value)
+                else:
+                    # Use data as is
+                    display_value = signal_data[data_key]
+                    
+                    # Handle empty or null values
+                    if display_value is None or display_value == '' or display_value == '--':
+                        display_value = 'N/A'
+                    
+                    self.signal_info[ui_key].set(display_value)
+            # Special case for PRIMARY_BAND if not in the data
+            elif ui_key == 'PRIMARY_BAND' and 'band' in signal_data and 'primary_band' not in signal_data:
+                # Use band as fallback for primary_band
+                display_value = signal_data['band']
+                if display_value is None or display_value == '' or display_value == '--':
+                    display_value = 'N/A'
+                self.signal_info[ui_key].set(display_value)
+
+        # Update RSRP color
+        if 'rsrp' in signal_data and signal_data['rsrp'] != '--':
+            try:
+                rsrp_value = float(signal_data['rsrp'].replace("dBm", "").strip())
+                self.update_rsrp_color(rsrp_value)
+            except (ValueError, TypeError) as e:
+                self.log_message(f"Could not parse RSRP value: {signal_data['rsrp']} - {str(e)}", log_type="detailed")
+                
+        # Check for significant signal changes
+        self.check_signal_changes(signal_data)
+
+    def update_rsrp_color(self, rsrp_value):
+        """Update the color of the RSRP value based on signal strength"""
+        try:
+            # Define color ranges for RSRP
+            if rsrp_value >= -80:  # Excellent
+                color = "#00A000"  # Green
+            elif rsrp_value >= -90:  # Good
+                color = "#A0A000"  # Yellow-green
+            elif rsrp_value >= -100:  # Fair
+                color = "#A05000"  # Orange
+            else:  # Poor
+                color = "#A00000"  # Red
+                
+            # Find the RSRP label and update its color
+            for widget in self.master.winfo_children():
+                if isinstance(widget, tk.Frame):
+                    for inner_widget in widget.winfo_children():
+                        if isinstance(inner_widget, ttk.LabelFrame) and inner_widget.winfo_children():
+                            for label_widget in inner_widget.winfo_children():
+                                if hasattr(label_widget, 'cget') and label_widget.cget('textvariable') == self.signal_info['RSRP']:
+                                    label_widget.config(foreground=color)
+                                    return
+        except Exception as e:
+            self.log_message(f"Error updating RSRP color: {str(e)}", log_type="detailed")
+
+    def select_active_band(self, active_band):
+        """Helper method to automatically select the active band in the UI"""
+        if not hasattr(self, 'band_vars') or not self.band_vars:
+            return
+        
+        # Parse active band string (might be a single band or comma-separated list)
+        active_bands = []
+        if isinstance(active_band, str):
+            # Check if it's a comma-separated list of bands
+            if ',' in active_band:
+                # Split the string into individual bands
+                active_bands = [band.strip() for band in active_band.split(',')]
+                self.log_message(f"Selecting multiple active bands: {active_bands}", log_type="detailed")
+            else:
+                # Single band
+                active_bands = [active_band.strip()]
+                self.log_message(f"Selecting single active band: {active_band}", log_type="detailed")
+        else:
+            # Not a valid band string
+            self.log_message(f"Invalid active band format: {active_band}", log_type="detailed")
+            return
+        
+        # First, uncheck all band checkboxes
+        self.uncheck_all_bands()
+        
+        # Process each band and try to check the corresponding checkbox
+        for band in active_bands:
+            # First check if this is a 5G band (starts with 'n')
+            is_5g = isinstance(band, str) and band.lower().startswith('n')
+            
+            # Clean the band value
+            clean_band = band
+            if isinstance(band, str):
+                # For 4G bands, ensure we have a 'B' prefix
+                if not is_5g and not band.upper().startswith('B') and band.replace('B', '').isdigit():
+                    clean_band = f"B{band.replace('B', '')}"
+                
+                # For 5G bands, ensure we have an 'n' prefix
+                if is_5g and not band.lower().startswith('n'):
+                    clean_band = f"n{band.replace('n', '')}"
+            
+            self.log_message(f"Checking for band: {clean_band}", log_type="detailed")
+            
+            # Try various formats to find the band checkbox
+            bands_to_try = [
+                clean_band,                # e.g., "B7" or "n78"
+                clean_band.upper(),        # e.g., "B7" or "N78"
+                clean_band.lower(),        # e.g., "b7" or "n78"
+                clean_band.replace('B', '').replace('b', '').replace('N', '').replace('n', '')  # e.g., "7" or "78"
+            ]
+            
+            # Try to match the band in the checkboxes
+            found = False
+            for band_to_try in bands_to_try:
+                if band_to_try in self.band_vars:
+                    # Set the checkbox to checked
+                    self.band_vars[band_to_try].set(True)
+                    self.log_message(f"Selected active band: {band_to_try}", log_type="detailed")
+                    found = True
+                    break
+            
+            if not found:
+                self.log_message(f"Could not find checkbox for band: {band} (not in available bands)", log_type="detailed")
+        
+        # Log available bands for debugging if we couldn't find any matches
+        if not any(self.band_vars[band].get() for band in self.band_vars):
+            available_bands = list(self.band_vars.keys())
+            if available_bands:
+                self.log_message(f"Available band checkboxes: {available_bands}", log_type="detailed")
+
+    def uncheck_all_bands(self):
+        """Uncheck all band checkboxes"""
+        if not hasattr(self, 'band_vars') or not self.band_vars:
+            return
+        
+        # Uncheck all band checkboxes
+        for band_var_key in self.band_vars:
+            self.band_vars[band_var_key].set(False)
+
+    def check_signal_changes(self, signal_data):
+        """Monitor significant changes in signal metrics and notify the user"""
+        if not self.notify_on_signal_change.get() or not signal_data:
+            return
+            
+        changes = []
+        
+        # Only check for band changes as requested by user, not RSRQ or other signal metrics
+        
+        # Check for primary band changes
+        if 'band' in signal_data and 'band' in self.last_signal:
+            if signal_data['band'] != self.last_signal['band']:
+                changes.append(f"Band: {self.last_signal['band']} → {signal_data['band']}")
+        
+        # Check for changes in the full bands list
+        if 'bands' in signal_data and 'bands' in self.last_signal:
+            if signal_data['bands'] != self.last_signal['bands']:
+                changes.append(f"All Bands: {self.last_signal['bands']} → {signal_data['bands']}")
+        
+        # Check for changes in primary band specifically 
+        if 'primary_band' in signal_data and 'primary_band' in self.last_signal:
+            if signal_data['primary_band'] != self.last_signal['primary_band']:
+                changes.append(f"Primary Band: {self.last_signal['primary_band']} → {signal_data['primary_band']}")
+                
+        # Notify if there are band changes
+        if changes:
+            message = " | ".join(changes)
+            self.log_message(f"Band change detected: {message}", log_type="both")
+            
+            # Show system notification if available
+            if NOTIFICATIONS_AVAILABLE:
+                try:
+                    notifier = ToastNotifier()
+                    notifier.show_toast(
+                        "Band Change Detected",
+                        message,
+                        duration=5,
+                        threaded=True
+                    )
+                except Exception as e:
+                    self.log_message(f"Error showing notification: {str(e)}", log_type="detailed")
+                    
+        # Update last signal data
+        self.last_signal = signal_data.copy()
+
+    def check_library_version(self):
+        """Check if the Huawei LTE API library is available and warn if not"""
+        if not HUAWEI_API_AVAILABLE and not self.api_restriction_warning_shown:
+            messagebox.showwarning(
+                "API Library Not Found", 
+                "The Huawei LTE API library is not installed. Some features may be limited.\n\n"
+                "To install the library, run: pip install huawei-lte-api"
+            )
+            self.api_restriction_warning_shown = True
+            # Disable API option
+            self.use_api_lib.set(False)
+        
+        # Alternatively, remove the API library check by editing __init__ to not call this method
+
+    def store_credentials(self, router_ip, username, password, use_api):
+        """Store credentials for reconnection purposes"""
+        self.stored_ip = router_ip
+        self.stored_username = username
+        self.stored_password = password
+        self.stored_api_mode = use_api
+        self.log_message("Stored credentials for auto-reconnection", log_type="detailed")
+
+    def connect_to_router(self):
+        """Connect to the Huawei router and get signal data"""
+        try:
+            # Get connection details
+            router_ip = self.router_ip.get()
+            username = self.username.get()
+            password = self.password.get()
+            use_api = self.connection_mode.get() == "API"
+            
+            if not router_ip:
+                messagebox.showerror("Connection Error", "Please enter router IP address")
+                return
+                
+            if not username or not password:
+                messagebox.showerror("Connection Error", "Please enter username and password")
+                return
+                
+            # Store credentials for reconnection
+            self.store_credentials(router_ip, username, password, use_api)
+            
+            # Show connecting status
+            self.status_var.set("Connecting...")
+            self.log_message(f"Connecting to {router_ip} using {'API' if use_api else 'Web'} mode...", log_type="both")
+            
+            # Attempt login
+            login_result = login_to_router(router_ip, username, password, use_api)
+            
+            if not login_result or not login_result[0]:
+                error_msg = login_result[2] if login_result and len(login_result) > 2 else "Unknown error"
+                self.status_var.set(f"Connection failed: {error_msg}")
+                self.log_message(f"Connection failed: {error_msg}", log_type="both")
+                messagebox.showerror("Connection Error", f"Failed to connect to router: {error_msg}")
+                return
+                
+            # Process login result
+            if use_api:
+                self.client = login_result[0]  # huawei_lte_api.Client instance
+                self.session = None
+                self.token = None
+                self.connection_type = "API"
+            else:
+                self.client = None
+                self.session = login_result[0]  # requests.Session
+                self.token = login_result[1]    # SessionID token
+                self.connection_type = "Web"
+                
+            self.is_connected = True
+            self.status_var.set(f"Connected to {router_ip} via {self.connection_type}")
+            self.log_message(f"Successfully connected to {router_ip} via {self.connection_type}", log_type="both")
+            
+            # Initialize or reset connection-related variables
+            self.reconnection_attempts = 0
+            self.last_session_activity = time.time()
+            self.session_timeout_detected = False
+            
+            # Start data polling
+            self.start_polling()
+            
+            # Start keepalive mechanism
+            self.start_session_keepalive()
+            
+            # Update UI elements
+            self.connect_button.config(text="Disconnect")
+            self.router_ip_entry.config(state="disabled")
+            self.username_entry.config(state="disabled")
+            self.password_entry.config(state="disabled")
+            self.conn_mode_dropdown.config(state="disabled")
+            
+            # Get available bands after successful connection
+            self.fetch_supported_bands()
+            
+        except Exception as e:
+            self.status_var.set(f"Connection error: {str(e)}")
+            self.log_message(f"Connection error: {str(e)}", log_type="both")
+            messagebox.showerror("Connection Error", f"Error connecting to router: {str(e)}")
+            self.is_connected = False
+
+    def auto_reconnect(self):
+        """Automatically reconnect using stored credentials"""
+        if not hasattr(self, 'stored_ip') or not self.stored_ip:
+            self.log_message("No stored credentials for auto-reconnection", log_type="both")
+            return False
+            
+        self.log_message("Auto-reconnecting with stored credentials...", log_type="both")
+        try:
+            return self.silent_reconnect(
+                self.stored_ip,
+                self.stored_username,
+                self.stored_password,
+                self.stored_api_mode
+            )
+        except Exception as e:
+            self.log_message(f"Auto-reconnect failed: {str(e)}", log_type="both")
+            return False
+
+    def poll_status(self):
+        """Poll signal status at regular intervals"""
+        try:
+            # Check if we should still be polling
+            if not self.is_connected:
+                self.log_message("Polling stopped - disconnected", log_type="detailed")
+                self.poll_status_task = None
+                return
+                
+            if not self.auto_refresh.get():
+                self.log_message("Polling stopped - auto-refresh disabled", log_type="detailed")
+                self.poll_status_task = None
+                return
+            
+            # Add failure counter logic to prevent infinite retries
+            if not hasattr(self, 'poll_failure_count'):
+                self.poll_failure_count = 0
+                
+            # Check if session timeout was detected
+            if hasattr(self, 'session_timeout_detected') and self.session_timeout_detected:
+                self.log_message("Session timeout detected. Attempting auto-reconnect...", log_type="both")
+                reconnect_result = self.auto_reconnect()
+                if reconnect_result:
+                    self.session_timeout_detected = False
+                    self.poll_failure_count = 0
+                    self.log_message("Auto-reconnect successful", log_type="both")
+                else:
+                    self.log_message("Auto-reconnect failed", log_type="both")
+                    self.poll_failure_count += 1
+            
+            # Limit consecutive failures
+            if hasattr(self, 'poll_failure_count') and self.poll_failure_count >= 5:
+                error_message = "Auto-refresh disabled after 5 consecutive failures. The router may be unresponsive."
+                self.log_message(error_message, log_type="both")
+                self.auto_refresh.set(False)
+                
+                # Update error display in UI
+                self.master.after(0, lambda: self.error_display.config(text=error_message))
+                
+                # Show a notification
+                try:
+                    if NOTIFICATIONS_AVAILABLE:
+                        toaster = ToastNotifier()
+                        toaster.show_toast(
+                            "Auto-refresh Disabled",
+                            error_message,
+                            icon_path=None,
+                            duration=5,
+                            threaded=True
+                        )
+                except Exception:
+                    pass
+                
+                self.poll_status_task = None
+                return
+            
+            # Refresh signal data
+            try:
+                self.refresh_signal()
+                self.log_message("Auto-refreshed signal data", log_type="detailed")
+                # Reset failure counter on success
+                self.poll_failure_count = 0
+                # Also reset session timeout flag
+                if hasattr(self, 'session_timeout_detected'):
+                    self.session_timeout_detected = False
+            except Exception as e:
+                error_str = str(e)
+                # Check if this is a session timeout error
+                if "No rights" in error_str or "needs login" in error_str or "100003" in error_str or "login required" in error_str:
+                    self.log_message("Session timeout detected in polling, will attempt reconnect", log_type="detailed")
+                    self.session_timeout_detected = True
+                
+                # Increment failure counter
+                self.poll_failure_count += 1
+                self.log_message(f"Error in auto-refresh ({self.poll_failure_count}/5): {str(e)}", log_type="both")
+            
+        except Exception as e:
+            self.log_message(f"Error in polling task: {str(e)}", log_type="both")
+        finally:
+            # Always schedule the next refresh, regardless of current state
+            # This ensures continuous polling as long as auto-refresh is enabled
+            if self.is_connected and self.auto_refresh.get():
+                try:
+                    # Use a shorter interval if we're waiting for reconnection
+                    interval = 5000 if hasattr(self, 'session_timeout_detected') and self.session_timeout_detected else self.signal_update_interval
+                    self.poll_status_task = self.master.after(interval, self.poll_status)
+                    self.log_message(f"Scheduled next poll in {interval/1000} seconds", log_type="detailed")
+                except Exception as e:
+                    self.log_message(f"Error scheduling next poll: {str(e)}", log_type="detailed")
+            else:
+                self.poll_status_task = None
 
 # Add a new function for scanning available bands - around line 700-800
 def scan_available_bands(session, ip, token):
