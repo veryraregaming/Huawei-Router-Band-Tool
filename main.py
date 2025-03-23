@@ -1583,6 +1583,12 @@ class BandOptimiserApp(tk.Frame):
                                           variable=self.download_band_vars[band])
             download_cb.grid(row=row, column=1, sticky=tk.W, padx=5, pady=1)
         
+        # Apply network configuration button for aggregation
+        apply_network_button = ttk.Button(aggregation_frame, text="Apply Network Configuration", 
+                                         command=self.apply_network_config)
+        apply_network_button.pack(pady=5)
+        create_tooltip(apply_network_button, "Apply the network aggregation settings - allows separate control of upload and download bands")
+        
         # Network Mode Quickswitch section
         quickswitch_frame = ttk.LabelFrame(bands_frame, text="Network Mode Quickswitch", padding="5")
         quickswitch_frame.pack(fill=tk.X, pady=2)
@@ -1602,12 +1608,6 @@ class BandOptimiserApp(tk.Frame):
                                        command=self.apply_network_mode, width=10)
         apply_mode_button.pack(side=tk.LEFT, padx=2, pady=2)
         create_tooltip(apply_mode_button, "Apply the selected network mode (2G/3G/4G/5G) to your router")
-        
-        # Apply network configuration button for aggregation
-        apply_network_button = ttk.Button(bands_frame, text="Apply Network Configuration", 
-                                         command=self.apply_network_config)
-        apply_network_button.pack(pady=5)
-        create_tooltip(apply_network_button, "Apply the network aggregation settings - allows separate control of upload and download bands")
         
         # Right column - Log and Actions
         right_col = ttk.Frame(content_frame)
@@ -2388,16 +2388,25 @@ class BandOptimiserApp(tk.Frame):
                 self.keepalive_task = None
                 
     def refresh_signal(self):
-        """Refresh signal data"""
-        if hasattr(self, 'refresh_in_progress') and self.refresh_in_progress:
-            self.log_message("Refresh already in progress - skipping", log_type="detailed")
+        """Refresh signal data from the router"""
+        # Check if we are connected to the router
+        if not self.session and not self.client:
+            self.log_message("Not connected to router. Please connect first.", log_type="both")
             return
             
-        # Set flag to prevent multiple refreshes
-        self.refresh_in_progress = True
+        self.log_message("Refreshing signal data...", log_type="both")
         
-        # Start refresh in a background thread
-        self.log_message("Refreshing signal data...", log_type="detailed")
+        # Increment manual selection refresh counter if we have manual selections
+        if hasattr(self, 'manual_selection_refresh_count'):
+            self.manual_selection_refresh_count += 1
+            # Reset manual selections after 5 refreshes to sync back with router
+            if self.manual_selection_refresh_count >= 5:
+                if hasattr(self, 'selected_upload_bands'):
+                    delattr(self, 'selected_upload_bands')
+                if hasattr(self, 'selected_download_bands'):
+                    delattr(self, 'selected_download_bands')
+                self.log_message("Manual band selections expired, syncing with router state", log_type="detailed")
+        
         threading.Thread(target=self.refresh_thread, daemon=True).start()
 
     def silent_reconnect(self, ip, username, password, use_api=True):
@@ -2782,8 +2791,234 @@ class BandOptimiserApp(tk.Frame):
     
     def apply_network_config(self):
         """Apply network aggregation configuration"""
-        # Implementation will be added here
-        pass
+        # Get selected bands for upload and download
+        selected_upload_bands = []
+        selected_download_bands = []
+        
+        for band_name, var in self.upload_band_vars.items():
+            if var.get():
+                selected_upload_bands.append(band_name)
+                
+        for band_name, var in self.download_band_vars.items():
+            if var.get():
+                selected_download_bands.append(band_name)
+        
+        if not selected_upload_bands and not selected_download_bands:
+            messagebox.showwarning("Selection Empty", "Please select at least one band for upload or download.")
+            return
+        
+        # Log the selected bands
+        self.log_message(f"Applying network aggregation settings - Upload: {', '.join(selected_upload_bands)}, Download: {', '.join(selected_download_bands)}", log_type="both")
+        
+        # Initialize counter to track signal refreshes since manual selection
+        self.manual_selection_refresh_count = 0
+        
+        # Apply the settings in a background thread
+        def apply_thread():
+            try:
+                # Convert band names to numbers
+                upload_band_nums = [int(band.replace('B', '')) for band in selected_upload_bands]
+                download_band_nums = [int(band.replace('B', '')) for band in selected_download_bands]
+                
+                session = self.session or self.client
+                if not session:
+                    # Use a regular function instead of a lambda to report the error
+                    def report_error():
+                        messagebox.showerror("Error", "Not connected to router")
+                    self.master.after(0, report_error)
+                    return
+                
+                # For upload bands
+                if selected_upload_bands:
+                    upload_hex = 0
+                    for band_num in upload_band_nums:
+                        # Set bit for band position (band 1 = bit 0, band 3 = bit 2, etc.)
+                        upload_hex |= (1 << (band_num - 1))
+                    
+                    if hasattr(session, 'net'):
+                        # API client
+                        current_mode = session.net.net_mode()
+                        
+                        # First set only the upload bands
+                        upload_response = session.net.set_net_mode(
+                            lteband=format(upload_hex, 'X'),
+                            networkband=current_mode.get('NetworkBand', '3FFFFFFF'),
+                            networkmode=current_mode.get('NetworkMode', '03')
+                        )
+                        
+                        if upload_response == 'OK' or (isinstance(upload_response, dict) and upload_response.get('result') == 'success'):
+                            # Use a regular function instead of a lambda
+                            def report_success_upload():
+                                self.log_message("✅ Upload bands applied successfully", log_type="both")
+                            self.master.after(0, report_success_upload)
+                        else:
+                            # Use a regular function instead of a lambda
+                            def report_failure_upload():
+                                self.log_message("❌ Failed to apply upload bands", log_type="both")
+                            self.master.after(0, report_failure_upload)
+                            
+                        # Store selected upload bands for UI update
+                        self.selected_upload_bands = selected_upload_bands
+                    else:
+                        # Web session
+                        # Get CSRF token
+                        token_url = f"http://{self.router_ip.get()}{TOKEN_ENDPOINT}"
+                        response = session.get(token_url, timeout=10)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_token():
+                                self.log_message("❌ Failed to get CSRF token", log_type="both")
+                            self.master.after(0, report_failure_token)
+                            return
+                        
+                        token = ET.fromstring(response.text).find("TokInfo").text
+                        
+                        # Get current network settings
+                        net_mode_url = f"http://{self.router_ip.get()}{NET_MODE_ENDPOINT}"
+                        response = session.get(net_mode_url, timeout=10)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_mode():
+                                self.log_message("❌ Failed to get network mode", log_type="both")
+                            self.master.after(0, report_failure_mode)
+                            return
+                        
+                        net_mode_data = ET.fromstring(response.text)
+                        network_mode = net_mode_data.find("NetworkMode").text
+                        network_band = net_mode_data.find("NetworkBand").text
+                        
+                        # Apply upload bands
+                        upload_payload = f"""
+                        <request>
+                            <NetworkMode>{network_mode}</NetworkMode>
+                            <NetworkBand>{network_band}</NetworkBand>
+                            <LTEBand>{format(upload_hex, 'X')}</LTEBand>
+                            <upload>1</upload>
+                        </request>
+                        """
+                        
+                        headers = {
+                            "Content-Type": "application/xml",
+                            "__RequestVerificationToken": token,
+                            "User-Agent": "Mozilla/5.0",
+                            "Referer": f"http://{self.router_ip.get()}/html/home.html"
+                        }
+                        
+                        response = session.post(net_mode_url, data=upload_payload, headers=headers, timeout=15)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_upload_post():
+                                self.log_message("❌ Failed to apply upload bands", log_type="both")
+                            self.master.after(0, report_failure_upload_post)
+                            return
+                        else:
+                            # Use a regular function instead of a lambda
+                            def report_success_upload():
+                                self.log_message("✅ Upload bands applied successfully", log_type="both")
+                            self.master.after(0, report_success_upload)
+                
+                # For download bands
+                if selected_download_bands:
+                    download_hex = 0
+                    for band_num in download_band_nums:
+                        # Set bit for band position
+                        download_hex |= (1 << (band_num - 1))
+                    
+                    if hasattr(session, 'net'):
+                        # API client
+                        # Get current network settings
+                        current_mode = session.net.net_mode()
+                        
+                        # Now set only the download bands
+                        download_response = session.net.set_net_mode(
+                            lteband=format(download_hex, 'X'),
+                            networkband=current_mode.get('NetworkBand', '3FFFFFFF'),
+                            networkmode=current_mode.get('NetworkMode', '03')
+                        )
+                        
+                        if download_response == 'OK' or (isinstance(download_response, dict) and download_response.get('result') == 'success'):
+                            # Use a regular function instead of a lambda
+                            def report_success_download():
+                                self.log_message("✅ Download bands applied successfully", log_type="both")
+                            self.master.after(0, report_success_download)
+                        else:
+                            # Use a regular function instead of a lambda
+                            def report_failure_download():
+                                self.log_message("❌ Failed to apply download bands", log_type="both")
+                            self.master.after(0, report_failure_download)
+                            
+                        # Store selected download bands for UI update
+                        self.selected_download_bands = selected_download_bands
+                    else:
+                        # Web session
+                        # Get a new token for the download request
+                        token_url = f"http://{self.router_ip.get()}{TOKEN_ENDPOINT}"
+                        response = session.get(token_url, timeout=10)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_token():
+                                self.log_message("❌ Failed to get CSRF token", log_type="both")
+                            self.master.after(0, report_failure_token)
+                            return
+                        
+                        token = ET.fromstring(response.text).find("TokInfo").text
+                        
+                        # Get current network settings
+                        net_mode_url = f"http://{self.router_ip.get()}{NET_MODE_ENDPOINT}"
+                        response = session.get(net_mode_url, timeout=10)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_mode():
+                                self.log_message("❌ Failed to get network mode", log_type="both")
+                            self.master.after(0, report_failure_mode)
+                            return
+                        
+                        net_mode_data = ET.fromstring(response.text)
+                        network_mode = net_mode_data.find("NetworkMode").text
+                        network_band = net_mode_data.find("NetworkBand").text
+                        
+                        # Apply download bands
+                        download_payload = f"""
+                        <request>
+                            <NetworkMode>{network_mode}</NetworkMode>
+                            <NetworkBand>{network_band}</NetworkBand>
+                            <LTEBand>{format(download_hex, 'X')}</LTEBand>
+                            <download>1</download>
+                        </request>
+                        """
+                        
+                        headers = {
+                            "Content-Type": "application/xml",
+                            "__RequestVerificationToken": token,
+                            "User-Agent": "Mozilla/5.0",
+                            "Referer": f"http://{self.router_ip.get()}/html/home.html"
+                        }
+                        
+                        response = session.post(net_mode_url, data=download_payload, headers=headers, timeout=15)
+                        if response.status_code != 200:
+                            # Use a regular function instead of a lambda
+                            def report_failure_download_post():
+                                self.log_message("❌ Failed to apply download bands", log_type="both")
+                            self.master.after(0, report_failure_download_post)
+                            return
+                        else:
+                            # Use a regular function instead of a lambda
+                            def report_success_download():
+                                self.log_message("✅ Download bands applied successfully", log_type="both")
+                            self.master.after(0, report_success_download)
+                
+                # Refresh signal data to show new band configuration
+                self.master.after(3000, self.refresh_signal)
+                
+            except Exception as e:
+                # Use a closure to capture the exception correctly
+                error_msg = str(e)
+                def report_error():
+                    self.log_message(f"❌ Error applying network configuration: {error_msg}", log_type="both")
+                self.master.after(0, report_error)
+        
+        # Start the thread
+        threading.Thread(target=apply_thread, daemon=True).start()
 
     def apply_network_mode(self):
         """Apply network mode selection"""
@@ -3496,248 +3731,21 @@ class BandOptimiserApp(tk.Frame):
             if hasattr(self, 'speedtest_button'):
                 self.master.after(0, lambda: self.speedtest_button.config(state=tk.NORMAL))
 
-    def save_config(self):
-        """Save configuration to file"""
-        try:
-            config = {
-                "router_ip": self.router_ip.get(),
-                "username": self.username.get(),
-                "password": self.password.get(),
-                "auto_connect": self.auto_connect.get(),
-                "auto_apply_bands": self.auto_apply_bands.get(),
-                "use_api_lib": self.use_api_lib.get(),
-                "run_speed_on_start": self.run_speed_on_start.get(),
-                "auto_refresh": self.auto_refresh.get(),
-                "monitor_bands": self.monitor_bands.get(),
-                "minimize_to_tray": self.minimize_to_tray.get(),
-                "notify_on_signal_change": self.notify_on_signal_change.get(),
-                "save_debug_data": getattr(self, 'save_debug_data', False),
-                "selected_bands": [band_name for band_name, var in self.band_vars.items() if var.get()]
-            }
-            
-            save_config(config)
-            self.log_message("Configuration saved", log_type="detailed")
-        except Exception as e:
-            self.log_message(f"Error saving configuration: {str(e)}", log_type="both")
-            
-    def show_donation_dialog(self):
-        """Show a dialog with donation information"""
-        try:
-            donation_text = "If you find this tool helpful, please consider supporting its development.\n\n"
-            donation_text += "PayPal: donate@example.com\n"
-            donation_text += "BTC: bc1qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-            donation_text += "ETH: 0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n"
-            donation_text += "Thank you for your support!"
-            
-            # Create a custom dialog
-            dialog = tk.Toplevel(self.master)
-            dialog.title("Support Development")
-            dialog.geometry("400x300")
-            dialog.resizable(False, False)
-            dialog.transient(self.master)
-            dialog.grab_set()
-            
-            # Add content
-            ttk.Label(dialog, text="Support Development", font=("", 12, "bold")).pack(pady=10)
-            
-            message = ttk.Label(dialog, text=donation_text, wraplength=380, justify=tk.CENTER)
-            message.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
-            
-            # Add close button
-            close_button = ttk.Button(dialog, text="Close", command=dialog.destroy)
-            close_button.pack(pady=10)
-            
-            # Center the dialog on the parent window
-            dialog.update_idletasks()
-            x = self.master.winfo_x() + (self.master.winfo_width() - dialog.winfo_width()) // 2
-            y = self.master.winfo_y() + (self.master.winfo_height() - dialog.winfo_height()) // 2
-            dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
-            
-        except Exception as e:
-            self.log_message(f"Error showing donation dialog: {str(e)}", log_type="both")
-
-    def setup_tray_icon(self):
-        """Setup system tray icon and menu"""
-        # Check if we already have a tray icon
-        if self.tray_icon is not None:
-            return
-            
-        try:
-            # Create system tray icon
-            if os.path.exists(self.icon_path):
-                icon_image = Image.open(self.icon_path)
-            else:
-                # Create a simple icon if the icon file doesn't exist
-                icon_image = Image.new('RGBA', (64, 64), color=(0, 120, 212, 255))
-                
-            # Create tray icon menu
-            menu = (
-                pystray.MenuItem('Show', self.show_window),
-                pystray.MenuItem('Exit', self.exit_app)
-            )
-            
-            # Create tray icon
-            self.tray_icon = pystray.Icon("Huawei Band Scanner", icon_image, "Huawei Band Scanner", menu)
-            
-            # Start tray icon in a separate thread
-            threading.Thread(target=self._run_tray_icon, daemon=True).start()
-            
-            # Bind window close event
-            self.master.protocol("WM_DELETE_WINDOW", self.on_close)
-            
-            self.log_message("System tray icon setup completed", log_type="detailed")
-        except Exception as e:
-            self.log_message(f"Failed to setup system tray icon: {str(e)}", log_type="both")
-            # Fallback to normal window behavior
-            self.master.protocol("WM_DELETE_WINDOW", self.master.destroy)
-            
-    def _run_tray_icon(self):
-        """Run the tray icon with error handling"""
-        try:
-            self.tray_icon.run()
-        except TypeError as e:
-            # Suppress Windows-specific errors
-            error_msg = str(e)
-            if any(err in error_msg for err in ["WPARAM is simple", "WNDPROC return value", "LRESULT"]):
-                # Silently ignore these specific Windows-related errors
-                pass
-            else:
-                print(f"Tray icon error: {str(e)}")
-        except Exception as e:
-            if "WNDPROC" in str(e) or "WPARAM" in str(e) or "LRESULT" in str(e):
-                # Also ignore Windows-specific errors that might be raised as different exception types
-                pass
-            else:
-                print(f"Tray icon error: {str(e)}")
-
-    def show_window(self, icon=None, item=None):
-        """Show the window from system tray"""
-        self.master.deiconify()
-        self.master.lift()
-        self.master.focus_force()
-
-    def hide_window(self):
-        """Hide the window to system tray"""
-        self.master.withdraw()
-        
-        # Show notification that app is still running
-        try:
-            toaster = ToastNotifier()
-            toaster.show_toast(
-                "Huawei Band Scanner",
-                "Application is still running in the system tray",
-                icon_path=None,
-                duration=3,
-                threaded=True
-            )
-        except Exception:
-            pass
-
-    def on_close(self):
-        """Handle window close event"""
-        if self.minimize_to_tray.get():
-            # Hide to system tray
-            self.hide_window()
-        else:
-            # Exit application
-            self.exit_app()
-
-    def exit_app(self, icon=None, item=None):
-        """Properly exit the application, cleaning up resources"""
-        try:
-            # Stop any auto-refresh and cancel polling task
-            if hasattr(self, 'auto_refresh') and self.auto_refresh.get():
-                self.toggle_auto_refresh()
-                
-            # Explicitly cancel polling task if it exists
-            if hasattr(self, 'poll_status_task') and self.poll_status_task:
-                try:
-                    self.master.after_cancel(self.poll_status_task)
-                    self.poll_status_task = None
-                    self.log_message("Cancelled polling task", log_type="detailed")
-                except Exception as e:
-                    self.log_message(f"Error cancelling poll task: {str(e)}", log_type="detailed")
-                
-            # Clean up tray icon if it exists
-            if hasattr(self, 'tray_icon') and self.tray_icon is not None:
-                try:
-                    self.tray_icon.stop()
-                except TypeError as e:
-                    # Suppress WPARAM error on Windows
-                    if "WPARAM is simple" not in str(e):
-                        print(f"Error stopping tray icon: {str(e)}")
-                except Exception as e:
-                    print(f"Error stopping tray icon: {str(e)}")
-                
-            # Save configuration before exit
-            self.save_config()
-            
-            # Exit the application
-            self.master.destroy()
-        except Exception as e:
-            print(f"Error exiting: {str(e)}")
-            # Force exit if cleanup fails
-            import sys
-            sys.exit(0)
-
-    def refresh_thread(self):
-        """Background thread for refreshing signal data"""
-        try:
-            # Check if we need to reconnect
-            if not hasattr(self, 'client') or self.client is None:
-                self.log_message("Client is None, attempting silent reconnect", log_type="detailed")
-                silent_reconnect_success = self.silent_reconnect(
-                    self.router_ip.get(), 
-                    self.username.get(), 
-                    self.password.get(), 
-                    getattr(self, 'use_api_value', True))
-                
-                if not silent_reconnect_success:
-                    self.log_message("Silent reconnect failed, cannot refresh signal", log_type="both")
-                    self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'})
-                    self.refresh_in_progress = False
-                    return
-            
-            # Log session info before attempting to fetch data
-            self.log_message("Attempting to fetch signal data with current session", log_type="detailed")
-            
-            # Fetch signal data using the standalone function
-            signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
-            
-            # If we got an empty result or session timeout was detected, try to reconnect
-            if not signal_data or hasattr(self, 'session_timeout_detected') and self.session_timeout_detected:
-                self.log_message("Session timeout detected or empty signal data, attempting to reconnect", log_type="detailed")
-                # Reset the flag
-                if hasattr(self, 'session_timeout_detected'):
-                    self.session_timeout_detected = False
-                
-                # Try to reconnect
-                silent_reconnect_success = self.silent_reconnect(
-                    self.router_ip.get(), 
-                    self.username.get(), 
-                    self.password.get(), 
-                    getattr(self, 'use_api_value', True))
-                
-                if silent_reconnect_success:
-                    # Try again with the new connection
-                    signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
-            
-            # Update UI with the fetched data
-            if signal_data:
-                # Schedule UI update on the main thread
-                self.master.after(0, lambda: self.update_signal_ui(signal_data))
-            else:
-                self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
-                
-        except Exception as e:
-            self.log_message(f"Error in refresh thread: {str(e)}", log_type="both")
-            self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
-        finally:
-            # Reset the flag when done
-            self.refresh_in_progress = False
-
     def update_signal_ui(self, signal_data):
         """Update UI with signal data"""
+        # First, ensure we have all band information compiled in a single place
+        if 'bands' in signal_data and signal_data['bands']:
+            # Already have bands field
+            all_bands = signal_data['bands']
+        elif 'band' in signal_data and signal_data['band']:
+            # Use band as fallback
+            all_bands = signal_data['band']
+        else:
+            all_bands = ""
+            
+        # Add all_bands to signal_data for consistent access
+        signal_data['all_bands'] = all_bands
+        
         # Define mapping between signal_data keys and display keys
         key_mapping = {
             'rsrp': 'RSRP',
@@ -3916,6 +3924,9 @@ class BandOptimiserApp(tk.Frame):
                 
         # Check for significant signal changes
         self.check_signal_changes(signal_data)
+        
+        # Always update the aggregation UI with the current band information
+        self.update_aggregation_ui(signal_data)
 
     def update_rsrp_color(self, rsrp_value):
         """Update the color of the RSRP value based on signal strength"""
@@ -4274,6 +4285,358 @@ class BandOptimiserApp(tk.Frame):
                     self.log_message(f"Error scheduling next poll: {str(e)}", log_type="detailed")
             else:
                 self.poll_status_task = None
+
+    def update_aggregation_ui(self, signal_data):
+        """Update the band aggregation UI to match actual active bands"""
+        try:
+            # Check if we have manual band selections that should be preserved
+            manually_set = hasattr(self, 'selected_upload_bands') and hasattr(self, 'selected_download_bands')
+            
+            if manually_set and (self.selected_upload_bands or self.selected_download_bands):
+                # Use manually selected bands
+                self.log_message("Using manually selected bands for aggregation UI", log_type="detailed")
+                
+                # Clear all checkboxes first
+                for band, var in self.upload_band_vars.items():
+                    var.set(band in self.selected_upload_bands)
+                    
+                for band, var in self.download_band_vars.items():
+                    var.set(band in self.selected_download_bands)
+                
+                # Log the active aggregation
+                upload_str = ", ".join(self.selected_upload_bands) if self.selected_upload_bands else "None"
+                download_str = ", ".join(self.selected_download_bands) if self.selected_download_bands else "None" 
+                self.log_message(f"Detected band aggregation - Upload: {upload_str}, Download: {download_str}", log_type="both")
+                
+                return
+            
+            # Get current active bands
+            upload_bands = signal_data.get("active_band_upload", "")
+            download_bands = signal_data.get("active_band", "")  # Download bands are in the active_band field
+            all_bands = signal_data.get("all_bands", "")  # Fallback to all_bands field
+            
+            # For cleaner log messages
+            upload_bands_list = []
+            download_bands_list = []
+            
+            # Clear all checkboxes first
+            for band, var in self.upload_band_vars.items():
+                var.set(False)
+                
+            for band, var in self.download_band_vars.items():
+                var.set(False)
+            
+            # If we don't have separate upload/download band info but we have all_bands, use it for download only
+            # Most routers use fewer bands for upload than download
+            if (not upload_bands or not download_bands) and all_bands:
+                self.log_message(f"Using all_bands as fallback for download bands: {all_bands}", log_type="detailed")
+                download_bands = all_bands
+                
+                # For upload, try to detect the primary band only (most routers use a single upload band)
+                if "primary_band" in signal_data and signal_data["primary_band"]:
+                    upload_bands = signal_data["primary_band"]
+                    self.log_message(f"Using primary_band as fallback for upload band: {upload_bands}", log_type="detailed")
+            
+            # Parse and set upload bands - handle more formats
+            if upload_bands:
+                self.log_message(f"Processing upload bands: {upload_bands}", log_type="detailed")
+                for band_num in [1, 3, 7, 8]:  # The bands we have UI for
+                    band_name = f"B{band_num}"
+                    # Check various formats that might indicate this band is active
+                    if any(pattern in upload_bands for pattern in [
+                        f"B{band_num}", 
+                        f"+{band_num}", 
+                        f"LTE B{band_num}",
+                        f"LTE+B{band_num}",
+                        f"BC{band_num}",
+                        f",{band_num},",
+                        f" {band_num},",
+                        f",{band_num} "
+                    ]):
+                        if band_name in self.upload_band_vars:
+                            self.upload_band_vars[band_name].set(True)
+                            upload_bands_list.append(band_name)
+            
+            # Parse and set download bands - handle more formats
+            if download_bands:
+                self.log_message(f"Processing download bands: {download_bands}", log_type="detailed")
+                for band_num in [1, 3, 7, 8]:  # The bands we have UI for
+                    band_name = f"B{band_num}"
+                    # Check various formats that might indicate this band is active
+                    if any(pattern in download_bands for pattern in [
+                        f"B{band_num}", 
+                        f"+{band_num}", 
+                        f"LTE B{band_num}",
+                        f"LTE+B{band_num}",
+                        f"BC{band_num}",
+                        f",{band_num},",
+                        f" {band_num},",
+                        f",{band_num} "
+                    ]):
+                        if band_name in self.download_band_vars:
+                            self.download_band_vars[band_name].set(True)
+                            download_bands_list.append(band_name)
+            
+            # Log the active aggregation if we found any
+            if upload_bands_list or download_bands_list:
+                self.log_message(f"Detected band aggregation - Upload: {', '.join(upload_bands_list)}, Download: {', '.join(download_bands_list)}", log_type="both")
+            else:
+                self.log_message("No bands detected for aggregation UI", log_type="detailed")
+        
+        except Exception as e:
+            self.log_message(f"Error updating aggregation UI: {str(e)}", log_type="detailed")
+
+    def refresh_thread(self):
+        """Background thread for refreshing signal data"""
+        try:
+            # Check if we need to reconnect
+            if not hasattr(self, 'client') or self.client is None:
+                self.log_message("Client is None, attempting silent reconnect", log_type="detailed")
+                silent_reconnect_success = self.silent_reconnect(
+                    self.router_ip.get(), 
+                    self.username.get(), 
+                    self.password.get(), 
+                    getattr(self, 'use_api_value', True))
+                
+                if not silent_reconnect_success:
+                    self.log_message("Silent reconnect failed, cannot refresh signal", log_type="both")
+                    self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'})
+                    self.refresh_in_progress = False
+                    return
+            
+            # Log session info before attempting to fetch data
+            self.log_message("Attempting to fetch signal data with current session", log_type="detailed")
+            
+            # Fetch signal data using the standalone function
+            signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
+            
+            # If we got an empty result or session timeout was detected, try to reconnect
+            if not signal_data or hasattr(self, 'session_timeout_detected') and self.session_timeout_detected:
+                self.log_message("Session timeout detected or empty signal data, attempting to reconnect", log_type="detailed")
+                # Reset the flag
+                if hasattr(self, 'session_timeout_detected'):
+                    self.session_timeout_detected = False
+                
+                # Try to reconnect
+                silent_reconnect_success = self.silent_reconnect(
+                    self.router_ip.get(), 
+                    self.username.get(), 
+                    self.password.get(), 
+                    getattr(self, 'use_api_value', True))
+                
+                if silent_reconnect_success:
+                    # Try again with the new connection
+                    signal_data = fetch_signal_data(self, self.client, self.router_ip.get(), getattr(self, 'token', None))
+            
+            # Update UI with the fetched data
+            if signal_data:
+                # Check if we have recently set manual band configuration that should persist
+                if hasattr(self, 'manual_selection_refresh_count'):
+                    # Track refresh count
+                    self.manual_selection_refresh_count += 1
+                    if self.manual_selection_refresh_count >= 5:
+                        # After 5 refreshes, clear manual selections to sync with router
+                        if hasattr(self, 'selected_upload_bands'):
+                            delattr(self, 'selected_upload_bands')
+                        if hasattr(self, 'selected_download_bands'):
+                            delattr(self, 'selected_download_bands')
+                        self.log_message("Manual band selections expired, syncing with router state", log_type="detailed")
+                
+                # Schedule UI update on the main thread
+                self.master.after(0, lambda: self.update_signal_ui(signal_data))
+            else:
+                self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
+                
+        except Exception as e:
+            self.log_message(f"Error in refresh thread: {str(e)}", log_type="both")
+            self.master.after(0, lambda: self.update_signal_ui({'rsrp': '--', 'rsrq': '--', 'sinr': '--', 'band': '--'}))
+        finally:
+            # Reset the flag when done
+            self.refresh_in_progress = False
+            
+    def on_close(self):
+        """Handle window close event"""
+        if self.minimize_to_tray.get():
+            # Hide to system tray
+            self.hide_window()
+        else:
+            # Exit application
+            self.exit_app()
+            
+    def exit_app(self, icon=None, item=None):
+        """Properly exit the application, cleaning up resources"""
+        try:
+            # Stop any auto-refresh and cancel polling task
+            if hasattr(self, 'auto_refresh') and self.auto_refresh.get():
+                self.toggle_auto_refresh()
+                
+            # Explicitly cancel polling task if it exists
+            if hasattr(self, 'poll_status_task') and self.poll_status_task:
+                try:
+                    self.master.after_cancel(self.poll_status_task)
+                    self.poll_status_task = None
+                    self.log_message("Cancelled polling task", log_type="detailed")
+                except Exception as e:
+                    self.log_message(f"Error cancelling poll task: {str(e)}", log_type="detailed")
+                
+            # Clean up tray icon if it exists
+            if hasattr(self, 'tray_icon') and self.tray_icon is not None:
+                try:
+                    self.tray_icon.stop()
+                except TypeError as e:
+                    # Suppress WPARAM error on Windows
+                    if "WPARAM is simple" not in str(e):
+                        print(f"Error stopping tray icon: {str(e)}")
+                except Exception as e:
+                    print(f"Error stopping tray icon: {str(e)}")
+                
+            # Save configuration before exit
+            self.save_config()
+            
+            # Exit the application
+            self.master.destroy()
+        except Exception as e:
+            print(f"Error exiting: {str(e)}")
+            # Force exit if cleanup fails
+            import sys
+            sys.exit(0)
+            
+    def show_window(self, icon=None, item=None):
+        """Show the window from system tray"""
+        self.master.deiconify()
+        self.master.lift()
+        self.master.focus_force()
+
+    def hide_window(self):
+        """Hide the window to system tray"""
+        self.master.withdraw()
+        
+        # Show notification that app is still running
+        try:
+            toaster = ToastNotifier()
+            toaster.show_toast(
+                "Huawei Band Scanner",
+                "Application is still running in the system tray",
+                icon_path=None,
+                duration=3,
+                threaded=True
+            )
+        except Exception:
+            pass
+            
+    def save_config(self):
+        """Save configuration to file"""
+        try:
+            config = {
+                "router_ip": self.router_ip.get(),
+                "username": self.username.get(),
+                "password": self.password.get(),
+                "auto_connect": self.auto_connect.get(),
+                "auto_apply_bands": self.auto_apply_bands.get(),
+                "use_api_lib": self.use_api_lib.get(),
+                "run_speed_on_start": self.run_speed_on_start.get(),
+                "auto_refresh": self.auto_refresh.get(),
+                "monitor_bands": self.monitor_bands.get(),
+                "minimize_to_tray": self.minimize_to_tray.get(),
+                "notify_on_signal_change": self.notify_on_signal_change.get(),
+                "save_debug_data": getattr(self, 'save_debug_data', False),
+                "selected_bands": [band_name for band_name, var in self.band_vars.items() if var.get()]
+            }
+            
+            save_config(config)
+            self.log_message("Configuration saved", log_type="detailed")
+        except Exception as e:
+            self.log_message(f"Error saving configuration: {str(e)}", log_type="both")
+            
+    def show_donation_dialog(self):
+        """Show a dialog with donation information"""
+        try:
+            donation_text = "If you find this tool helpful, please consider supporting its development.\n\n"
+            donation_text += "PayPal: donate@example.com\n"
+            donation_text += "BTC: bc1qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            donation_text += "ETH: 0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n"
+            donation_text += "Thank you for your support!"
+            
+            # Create a custom dialog
+            dialog = tk.Toplevel(self.master)
+            dialog.title("Support Development")
+            dialog.geometry("400x300")
+            dialog.resizable(False, False)
+            dialog.transient(self.master)
+            dialog.grab_set()
+            
+            # Add content
+            ttk.Label(dialog, text="Support Development", font=("", 12, "bold")).pack(pady=10)
+            
+            message = ttk.Label(dialog, text=donation_text, wraplength=380, justify=tk.CENTER)
+            message.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
+            
+            # Add close button
+            close_button = ttk.Button(dialog, text="Close", command=dialog.destroy)
+            close_button.pack(pady=10)
+            
+            # Center the dialog on the parent window
+            dialog.update_idletasks()
+            x = self.master.winfo_x() + (self.master.winfo_width() - dialog.winfo_width()) // 2
+            y = self.master.winfo_y() + (self.master.winfo_height() - dialog.winfo_height()) // 2
+            dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+            
+        except Exception as e:
+            self.log_message(f"Error showing donation dialog: {str(e)}", log_type="both")
+            
+    def setup_tray_icon(self):
+        """Setup system tray icon and menu"""
+        # Check if we already have a tray icon
+        if hasattr(self, 'tray_icon') and self.tray_icon is not None:
+            return
+            
+        try:
+            # Create system tray icon
+            if os.path.exists(self.icon_path):
+                icon_image = Image.open(self.icon_path)
+            else:
+                # Create a simple icon if the icon file doesn't exist
+                icon_image = Image.new('RGBA', (64, 64), color=(0, 120, 212, 255))
+                
+            # Create tray icon menu
+            menu = (
+                pystray.MenuItem('Show', self.show_window),
+                pystray.MenuItem('Exit', self.exit_app)
+            )
+            
+            # Create tray icon
+            self.tray_icon = pystray.Icon("Huawei Band Scanner", icon_image, "Huawei Band Scanner", menu)
+            
+            # Start tray icon in a separate thread
+            threading.Thread(target=self._run_tray_icon, daemon=True).start()
+            
+            # Bind window close event
+            self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+            
+            self.log_message("System tray icon setup completed", log_type="detailed")
+        except Exception as e:
+            self.log_message(f"Failed to setup system tray icon: {str(e)}", log_type="both")
+            # Fallback to normal window behavior
+            self.master.protocol("WM_DELETE_WINDOW", self.master.destroy)
+            
+    def _run_tray_icon(self):
+        """Run the tray icon with error handling"""
+        try:
+            self.tray_icon.run()
+        except TypeError as e:
+            # Suppress Windows-specific errors
+            error_msg = str(e)
+            if any(err in error_msg for err in ["WPARAM is simple", "WNDPROC return value", "LRESULT"]):
+                # Silently ignore these specific Windows-related errors
+                pass
+            else:
+                print(f"Tray icon error: {str(e)}")
+        except Exception as e:
+            if "WNDPROC" in str(e) or "WPARAM" in str(e) or "LRESULT" in str(e):
+                # Also ignore Windows-specific errors that might be raised as different exception types
+                pass
+            else:
+                print(f"Tray icon error: {str(e)}")
 
 # Add a new function for scanning available bands - around line 700-800
 def scan_available_bands(session, ip, token):
