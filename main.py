@@ -469,34 +469,19 @@ def login_to_router(ip, username, password, use_api_lib=True):
 # Fetch Signal Data using huawei-lte-api library
 def fetch_signal_data_api(self, client, ip):
     """Fetch signal data using the Huawei LTE API library"""
+    signal_data = {}
+    
+    if not client:
+        return {"rsrp": "--", "rsrq": "--", "sinr": "--", "band": "--", "mode": "--"}
+    
     try:
-        # Verify client is valid before proceeding
-        if client is None:
-            self.log_message("API client is None, cannot fetch signal data", log_type="both")
-            
-            # Try to reconnect if we have credentials
-            if hasattr(self, 'username') and hasattr(self, 'password') and self.username.get() and self.password.get():
-                self.log_message("Attempting to reconnect with saved credentials", log_type="both")
-                reconnection_successful = self.silent_reconnect(
-                    self.router_ip.get(), 
-                    self.username.get(), 
-                    self.password.get(), 
-                    getattr(self, 'use_api_value', True))
-                    
-                if reconnection_successful and self.client:
-                    # If reconnection succeeded, retry with the new client
-                    return fetch_signal_data_api(self, self.client, ip)
-            
-            # If we couldn't reconnect, raise an exception
-            raise Exception("Invalid API client, reconnection attempt failed")
-            
-        # Get signal information
+        # Try to get detailed signal info
         signal_info = client.device.signal()
         
-        # Initialize data dictionary
-        signal_data = {}
+        # Debug raw data
+        self.log_message(f"Raw signal API response: {signal_info}", log_type="detailed")
         
-        # Extract signal values (structure depends on the API version)
+        # Extract signal strength values
         if 'rsrp' in signal_info:
             signal_data['rsrp'] = signal_info.get('rsrp', '--')
         elif 'cell_id' in signal_info:
@@ -535,13 +520,68 @@ def fetch_signal_data_api(self, client, ip):
         
         # Get network mode and band info
         try:
+            # Get network type information first
+            # Try from monitoring.status which usually has accurate network type info
+            try:
+                status_info = client.monitoring.status()
+                if 'CurrentNetworkType' in status_info:
+                    network_type_code = status_info.get('CurrentNetworkType', '--')
+                    signal_data['mode'] = network_type_code
+                    self.log_message(f"Network type from monitoring status: {network_type_code}", log_type="detailed")
+                    
+                    # For 5G modes, we need to check for 5G bands separately
+                    if network_type_code in ['21', '22', '23', '101', '102', '103']:
+                        self.log_message("Detected 5G network type, checking for 5G bands", log_type="detailed")
+            except Exception as e:
+                self.log_message(f"Error getting monitoring status: {str(e)}", log_type="detailed")
+                
             # Try to get detailed band information using different API endpoints
-            
             # Method 1: Try to get from net.net_mode
             try:
                 net_mode_info = client.net.net_mode()
                 # Debug the response
                 self.log_message(f"Net mode info: {net_mode_info}", log_type="detailed")
+                
+                if 'NetworkMode' in net_mode_info:
+                    signal_data['mode'] = net_mode_info['NetworkMode']
+                
+                # Check for 5G bands
+                if 'NrBand' in net_mode_info and net_mode_info['NrBand'] not in ['--', '0']:
+                    self.log_message(f"5G NR band found: {net_mode_info['NrBand']}", log_type="detailed")
+                    # Parse 5G bands if available
+                    try:
+                        nr_band_hex = net_mode_info['NrBand']
+                        nr_band_int = int(nr_band_hex, 16)
+                        active_5g_bands = []
+                        
+                        # Map hex value to band numbers for 5G
+                        # This is a simplified approach, actual mapping depends on the device
+                        nr_band_map = {
+                            1: 0x1, 3: 0x4, 5: 0x10, 
+                            8: 0x80, 28: 0x8000000, 
+                            41: 0x2000000000, 78: 0x4000000000000, 
+                            79: 0x8000000000000
+                        }
+                        
+                        for band_num, band_hex in nr_band_map.items():
+                            if nr_band_int & band_hex:
+                                active_5g_bands.append(f"n{band_num}")
+                        
+                        if active_5g_bands:
+                            if 'bands' in signal_data and signal_data['bands'] != '--':
+                                # Add 5G bands to existing bands
+                                existing_bands = signal_data['bands'].split(',')
+                                all_bands = existing_bands + active_5g_bands
+                                signal_data['bands'] = ', '.join(all_bands)
+                            else:
+                                signal_data['bands'] = ', '.join(active_5g_bands)
+                                
+                            # If we detected 5G bands but network mode didn't indicate 5G,
+                            # force the mode to 5G NSA for correct display
+                            if signal_data.get('mode') not in ['21', '22', '23', '101', '102', '103']:
+                                signal_data['mode'] = '21'  # 5G NSA
+                    except Exception as e:
+                        self.log_message(f"Error parsing 5G NrBand hex: {str(e)}", log_type="detailed")
                 
                 if 'LTEBand' in net_mode_info:
                     # This is the hex value of the current band
@@ -559,9 +599,22 @@ def fetch_signal_data_api(self, client, ip):
                                     active_bands.append(f"B{band_num}")
                             
                             if active_bands:
-                                signal_data['bands'] = ', '.join(active_bands)
-                                signal_data['band'] = active_bands[0]  # Primary band is first one
-                                signal_data['primary_band'] = active_bands[0]
+                                if 'bands' in signal_data and signal_data['bands'] != '--':
+                                    # If we already have bands (likely 5G), add these LTE bands
+                                    existing_bands = signal_data['bands'].split(',')
+                                    # Prevent duplicates
+                                    for band in active_bands:
+                                        if band not in existing_bands:
+                                            existing_bands.append(band)
+                                    signal_data['bands'] = ', '.join(existing_bands)
+                                else:
+                                    signal_data['bands'] = ', '.join(active_bands)
+                                
+                                if 'band' not in signal_data or signal_data['band'] == '--':
+                                    signal_data['band'] = active_bands[0]  # Primary band is first one
+                                
+                                if 'primary_band' not in signal_data or signal_data['primary_band'] == '--':
+                                    signal_data['primary_band'] = active_bands[0]
                         except Exception as e:
                             self.log_message(f"Error parsing band hex: {str(e)}", log_type="detailed")
             except Exception as e:
@@ -588,12 +641,11 @@ def fetch_signal_data_api(self, client, ip):
                         signal_data['band'] = band_value
                         break
             
-            # Method 3: Try to get from monitoring status
+            # Method 3: Try to get from monitoring status again for additional details
             if 'band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE':
                 try:
                     status_info = client.monitoring.status()
-                    if 'CurrentNetworkType' in status_info:
-                        signal_data['mode'] = status_info['CurrentNetworkType']
+                    # Already got CurrentNetworkType earlier, so just look for band info
                     
                     # Try to extract band information from various fields
                     if 'CurrentBand' in status_info and status_info['CurrentBand'] != '--':
@@ -606,31 +658,32 @@ def fetch_signal_data_api(self, client, ip):
                     band_info_fields = ['LTEBand', 'LTECA', 'CABands', 'LTECAInfo']
                     for field in band_info_fields:
                         if field in status_info and status_info[field] != '--':
-                            signal_data['bands'] = status_info[field]
-                            break
+                            if 'bands' not in signal_data or signal_data['bands'] == '--':
+                                signal_data['bands'] = status_info[field]
                 except Exception as e:
-                    self.log_message(f"Error getting monitoring status: {str(e)}", log_type="detailed")
+                    self.log_message(f"Error getting additional monitoring status: {str(e)}", log_type="detailed")
                     
             # If we still don't have band info, try other methods
             if 'band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE':
                 # Get current PLMN for provider info
-                plmn_info = client.net.current_plmn()
-                signal_data['plmn_name'] = plmn_info.get('FullName', '--')
-                
-                # Try to get network mode info again to fill in missing data
-                mode_info = client.net.network_mode()
-                if 'NetworkMode' in mode_info and mode_info['NetworkMode'] != '--':
-                    signal_data['mode'] = mode_info['NetworkMode']
+                try:
+                    plmn_info = client.net.current_plmn()
+                    signal_data['plmn_name'] = plmn_info.get('FullName', '--')
+                except Exception as e:
+                    self.log_message(f"Error getting PLMN info: {str(e)}", log_type="detailed")
                 
                 # Last resort - check if there's info from the basic monitoring status
-                monitoring_status = client.monitoring.status()
-                for key, value in monitoring_status.items():
-                    if 'band' in key.lower() and value != '--':
-                        band_value = value
-                        if not band_value.startswith('B') and band_value.isdigit():
-                            band_value = f"B{band_value}"
-                        signal_data['band'] = band_value
-                        break
+                try:
+                    monitoring_status = client.monitoring.status()
+                    for key, value in monitoring_status.items():
+                        if 'band' in key.lower() and value != '--':
+                            band_value = value
+                            if not band_value.startswith('B') and band_value.isdigit():
+                                band_value = f"B{band_value}"
+                            signal_data['band'] = band_value
+                            break
+                except Exception as e:
+                    self.log_message(f"Error in final band detection: {str(e)}", log_type="detailed")
             
             # If we have a bands list but no primary band, set it
             if 'bands' in signal_data and ('band' not in signal_data or signal_data['band'] == '--' or signal_data['band'] == 'LTE'):
@@ -650,29 +703,12 @@ def fetch_signal_data_api(self, client, ip):
         try:
             traffic_stats = client.monitoring.traffic_statistics()
             
-            # Save raw traffic stats to file for debugging
-            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
-            if not os.path.exists(debug_dir):
-                os.makedirs(debug_dir)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            debug_file = os.path.join(debug_dir, f"raw_traffic_stats_{timestamp}.json")
-            with open(debug_file, 'w') as f:
-                json.dump(traffic_stats, f, indent=4, default=str)
-            self.log_message(f"Saved raw traffic stats to {debug_file}", log_type="detailed")
-            
             # Log the raw values but don't update the UI display
             current_dl_rate = float(traffic_stats.get('CurrentDownloadRate', 0))
             current_ul_rate = float(traffic_stats.get('CurrentUploadRate', 0))
             
             # Log the raw traffic stats for reference, but don't set in signal_data
-            self.log_message(f"Raw download rate: {current_dl_rate} bytes/s", log_type="detailed")
-            self.log_message(f"Raw upload rate: {current_ul_rate} bytes/s", log_type="detailed")
-            
-            # Calculate and log values but don't assign to signal_data
-            dl_mbps = (current_dl_rate * 8) / 1000000
-            ul_mbps = (current_ul_rate * 8) / 1000000
-            self.log_message(f"Current download rate: {dl_mbps:.2f} Mbps (not displayed in UI)", log_type="detailed")
-            self.log_message(f"Current upload rate: {ul_mbps:.2f} Mbps (not displayed in UI)", log_type="detailed")
+            self.log_message(f"Current traffic rates - DL: {current_dl_rate/1024:.2f} KB/s, UL: {current_ul_rate/1024:.2f} KB/s", log_type="detailed")
             
             # Don't assign values to signal_data as per user request
             # Only speedtest should update these values
@@ -683,15 +719,16 @@ def fetch_signal_data_api(self, client, ip):
         # Debug the signal data
         self.log_message(f"API signal data: {signal_data}", log_type="detailed")
         
-        # Save processed signal data to file
-        debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
-        if not os.path.exists(debug_dir):
-            os.makedirs(debug_dir)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        debug_file = os.path.join(debug_dir, f"processed_signal_data_{timestamp}.json")
-        with open(debug_file, 'w') as f:
-            json.dump(signal_data, f, indent=4, default=str)
-        self.log_message(f"Saved processed signal data to {debug_file}", log_type="detailed")
+        # Save processed signal data to file only if debug is enabled
+        if hasattr(self, 'save_debug_data') and self.save_debug_data:
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+            if not os.path.exists(debug_dir):
+                os.makedirs(debug_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_file = os.path.join(debug_dir, f"processed_signal_data_{timestamp}.json")
+            with open(debug_file, 'w') as f:
+                json.dump(signal_data, f, indent=4, default=str)
+            self.log_message(f"Saved processed signal data to {debug_file}", log_type="detailed")
         
         return signal_data
     except Exception as e:
@@ -854,16 +891,41 @@ def get_connection_status(session, ip, token):
             connection_status = status_info.get('ConnectionStatus', 'Unknown')
             network_type = status_info.get('CurrentNetworkType', 'Unknown')
             
+            # Check if actually using 5G - get additional info
+            has_active_5g = False
+            try:
+                signal_info = session.device.signal()
+                if ('nrdlbandwidth' in signal_info and signal_info['nrdlbandwidth'] and 
+                    signal_info['nrdlbandwidth'] not in ['--', '0', '0.0', '0MHz', '0.0MHz']):
+                    has_active_5g = True
+                
+                if ('nrdlfreq' in signal_info and signal_info['nrdlfreq'] and 
+                    signal_info['nrdlfreq'] not in ['--', '0', '0.0']):
+                    has_active_5g = True
+            except:
+                # If we can't check 5G status, just use the standard mapping
+                pass
+            
             # Map network type to text
             network_types = {
                 "0": "No Service", "1": "GSM", "2": "GPRS", "3": "EDGE", "4": "WCDMA",
-                "5": "HSDPA", "6": "HSUPA", "7": "HSPA", "8": "TD-SCDMA", "9": "HSPA+",
-                "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA"
+                "5": "HSDPA", "6": "HSUPA", "7": "4G", "8": "TD-SCDMA", "9": "HSPA+",
+                "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA",
+                "23": "5G", "00": "4G", "101": "5G NSA", "102": "5G SA", "103": "5G"
             }
+            
+            # Only show 5G network types if we actually have 5G connectivity
+            network_type_text = network_types.get(network_type, f"Unknown ({network_type})")
+            if not has_active_5g and ("5G" in network_type_text or "NR" in network_type_text):
+                # If the network type claims 5G but we have no 5G connectivity, show 4G/4G+
+                if network_type == "20" or "LTE-CA" in network_type_text:
+                    network_type_text = "4G+"
+                else:
+                    network_type_text = "4G"
             
             return {
                 "status": connection_status,
-                "network_type": network_types.get(network_type, f"Unknown ({network_type})")
+                "network_type": network_type_text
             }
         except Exception as e:
             return {"status": "Error", "network_type": f"API Error ({str(e)})"}
@@ -883,8 +945,9 @@ def get_connection_status(session, ip, token):
             network_type = data.find("CurrentNetworkType")
             network_types = {
                 "0": "No Service", "1": "GSM", "2": "GPRS", "3": "EDGE", "4": "WCDMA",
-                "5": "HSDPA", "6": "HSUPA", "7": "HSPA", "8": "TD-SCDMA", "9": "HSPA+",
-                "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA"
+                "5": "HSDPA", "6": "HSUPA", "7": "4G", "8": "TD-SCDMA", "9": "HSPA+",
+                "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA",
+                "23": "5G", "00": "4G", "101": "5G NSA", "102": "5G SA", "103": "5G"
             }
             return {
                 "status": status.text if status is not None else "Unknown",
@@ -1180,6 +1243,7 @@ class BandOptimiserApp(tk.Frame):
         # UI state variables
         self.status_var = tk.StringVar(value="Not Connected")
         self.auto_connect = tk.BooleanVar(value=False)
+        self.auto_apply_bands = tk.BooleanVar(value=False)  # Explicitly off by default
         self.use_api_lib = tk.BooleanVar(value=True)
         self.auto_refresh = tk.BooleanVar(value=True)
         self.monitor_bands = tk.BooleanVar(value=False)
@@ -1253,12 +1317,16 @@ class BandOptimiserApp(tk.Frame):
             
             # Load other settings
             self.auto_connect.set(config.get("auto_connect", False))
+            self.auto_apply_bands.set(config.get("auto_apply_bands", False))  # Explicitly off by default
             self.use_api_lib.set(config.get("use_api_lib", True))
             self.run_speed_on_start.set(config.get("run_speed_on_start", False))
             self.auto_refresh.set(config.get("auto_refresh", True))
             self.monitor_bands.set(config.get("monitor_bands", False))
             self.minimize_to_tray.set(config.get("minimize_to_tray", False))
             self.notify_on_signal_change.set(config.get("notify_on_signal_change", True))
+            
+            # Debug settings
+            self.save_debug_data = config.get("save_debug_data", False)
             
             # Load band selections
             selected_bands = config.get("selected_bands", [])
@@ -1289,65 +1357,59 @@ class BandOptimiserApp(tk.Frame):
         tools_menu = tk.Menu(menu_bar, tearoff=0)
         menu_bar.add_cascade(label="Tools", menu=tools_menu)
         
-        tools_menu.add_command(label="Speed Test", command=self.start_speedtest)
-        tools_menu.add_command(label="Apply Band Selection", command=self.apply_band_selection)
+        tools_menu.add_command(label="Run Speedtest", command=self.start_speedtest)
+        tools_menu.add_command(label="Optimize Bands", command=self.optimise)
+        tools_menu.add_command(label="Enhanced Optimize", command=self.enhanced_optimise)
         
         # Create Options menu
         options_menu = tk.Menu(menu_bar, tearoff=0)
         menu_bar.add_cascade(label="Options", menu=options_menu)
         
-        options_menu.add_checkbutton(label="Auto Refresh", variable=self.auto_refresh, 
-                                    command=self.toggle_auto_refresh)
-        options_menu.add_checkbutton(label="Monitor and Lock Bands", variable=self.monitor_bands,
+        # Add checkboxes for various options
+        options_menu.add_checkbutton(label="Auto-connect at startup", 
+                                    variable=self.auto_connect,
                                     command=self.save_config)
-        options_menu.add_checkbutton(label="Minimize to Tray on Close", variable=self.minimize_to_tray,
-                                   command=self.save_config)  # Ensure this saves config when changed
         
-        # Add notifications option
-        options_menu.add_checkbutton(
-            label="Signal Change Notifications", 
-            variable=self.notify_on_signal_change, 
-            command=self.save_config
-        )
+        options_menu.add_checkbutton(label="Auto-apply bands on connect", 
+                                    variable=self.auto_apply_bands,
+                                    command=self.save_config)
         
-        # Add auto-connect option
-        options_menu.add_checkbutton(
-            label="Auto-Connect at Startup", 
-            variable=self.auto_connect, 
-            command=self.save_config
-        )
+        options_menu.add_checkbutton(label="Run speedtest on startup", 
+                                    variable=self.run_speed_on_start,
+                                    command=self.save_config)
         
-        # Add API library option
-        options_menu.add_checkbutton(
-            label="Use Huawei LTE API Library", 
-            variable=self.use_api_lib, 
-            command=self.save_config
-        )
+        options_menu.add_checkbutton(label="Auto-refresh signal", 
+                                    variable=self.auto_refresh,
+                                    command=lambda: (self.save_config(), self.toggle_auto_refresh()))
         
-        # Add speedtest on startup option
-        options_menu.add_checkbutton(
-            label="Run Speedtest on Startup", 
-            variable=self.run_speed_on_start, 
-            command=self.save_config
-        )
+        options_menu.add_checkbutton(label="Minimize to tray on close", 
+                                    variable=self.minimize_to_tray,
+                                    command=self.save_config)
         
-        # Add optimise button
-        options_menu.add_command(
-            label="Optimise Bands", 
-            command=self.optimise
-        )
+        options_menu.add_checkbutton(label="Notify on signal changes", 
+                                    variable=self.notify_on_signal_change,
+                                    command=self.save_config)
         
-        # Add enhanced optimise button
-        options_menu.add_command(
-            label="Enhanced Optimise", 
-            command=self.enhanced_optimise
-        )
+        # Debug settings submenu
+        debug_menu = tk.Menu(options_menu, tearoff=0)
+        options_menu.add_cascade(label="Debug Settings", menu=debug_menu)
         
-        # Add donate menu
-        options_menu.add_command(
-            label="Donate", 
-            command=self.show_donation_dialog
-        )
+        # Create a variable for the debug menu option
+        self.save_debug_var = tk.BooleanVar(value=getattr(self, 'save_debug_data', False))
+        
+        debug_menu.add_checkbutton(label="Save Debug Data (JSON Files)", 
+                                variable=self.save_debug_var,
+                                command=self.toggle_debug_data)
+        
+        # Add donation menu item with separator
+        options_menu.add_separator()
+        options_menu.add_command(label="Support Development (Donate)", command=self.show_donation_dialog)
+    
+    def toggle_debug_data(self):
+        """Toggle saving debug data and update config"""
+        self.save_debug_data = self.save_debug_var.get()
+        self.log_message(f"Debug data saving {'enabled' if self.save_debug_data else 'disabled'}", log_type="both")
+        self.save_config()
 
     def create_main_frame(self):
         # Create a frame for the main content
@@ -1379,6 +1441,9 @@ class BandOptimiserApp(tk.Frame):
         
         auto_connect_cb = ttk.Checkbutton(options_frame, text="Auto-connect at startup", variable=self.auto_connect)
         auto_connect_cb.pack(anchor=tk.W, pady=2)
+        
+        auto_apply_cb = ttk.Checkbutton(options_frame, text="Auto-apply bands on connect", variable=self.auto_apply_bands)
+        auto_apply_cb.pack(anchor=tk.W, pady=2)
         
         if HUAWEI_API_AVAILABLE:
             api_lib_cb = ttk.Checkbutton(options_frame, text="Use Huawei LTE API library", variable=self.use_api_lib)
@@ -1825,12 +1890,22 @@ class BandOptimiserApp(tk.Frame):
                         # Start polling
                         self.poll_status()
                         self.log_message("Auto-refresh enabled. Signal will update every 30 seconds.", log_type="both")
-                        
+                    
                     # Scan for available bands
                     threading.Thread(target=self.update_band_selection_ui, daemon=True).start()
                     
                     # Refresh signal once after connection
                     threading.Thread(target=self.refresh_signal, daemon=True).start()
+                    
+                    # Auto-apply band selection if enabled
+                    if self.auto_apply_bands.get():
+                        # Get selected bands from config
+                        selected_bands = [band for band, var in self.band_vars.items() if var.get()]
+                        if selected_bands:
+                            self.log_message(f"Auto-applying band selection from config: {', '.join(selected_bands)}", log_type="both")
+                            threading.Thread(target=lambda: self.apply_band_thread(selected_bands), daemon=True).start()
+                        else:
+                            self.log_message("Auto-apply bands enabled but no bands selected in config", log_type="both")
                     
                     # Clear any error messages
                     self.error_display.config(text="")
@@ -3423,28 +3498,27 @@ class BandOptimiserApp(tk.Frame):
 
     def save_config(self):
         """Save configuration to file"""
-        # Get current configuration
-        config = {
-            "router_ip": self.router_ip.get(),
-            "username": self.username.get(),
-            "password": self.password.get(),  # Save password as-is
-            "auto_refresh": self.auto_refresh.get(),
-            "monitor_bands": self.monitor_bands.get(),
-            "minimize_to_tray": self.minimize_to_tray.get(),
-            "auto_connect": self.auto_connect.get(),
-            "use_api_lib": self.use_api_lib.get(),
-            "run_speed_on_start": self.run_speed_on_start.get(),
-            "notify_on_signal_change": self.notify_on_signal_change.get(),
-            "selected_bands": [band for band, var in self.band_vars.items() if var.get()]
-        }
-        
-        # Save to file
         try:
-            with open("config.json", "w") as f:
-                json.dump(config, f, indent=4, sort_keys=True)
+            config = {
+                "router_ip": self.router_ip.get(),
+                "username": self.username.get(),
+                "password": self.password.get(),
+                "auto_connect": self.auto_connect.get(),
+                "auto_apply_bands": self.auto_apply_bands.get(),
+                "use_api_lib": self.use_api_lib.get(),
+                "run_speed_on_start": self.run_speed_on_start.get(),
+                "auto_refresh": self.auto_refresh.get(),
+                "monitor_bands": self.monitor_bands.get(),
+                "minimize_to_tray": self.minimize_to_tray.get(),
+                "notify_on_signal_change": self.notify_on_signal_change.get(),
+                "save_debug_data": getattr(self, 'save_debug_data', False),
+                "selected_bands": [band_name for band_name, var in self.band_vars.items() if var.get()]
+            }
+            
+            save_config(config)
             self.log_message("Configuration saved", log_type="detailed")
         except Exception as e:
-            self.log_message(f"Failed to save configuration: {str(e)}", log_type="detailed")
+            self.log_message(f"Error saving configuration: {str(e)}", log_type="both")
             
     def show_donation_dialog(self):
         """Show a dialog with donation information"""
@@ -3688,24 +3762,94 @@ class BandOptimiserApp(tk.Frame):
                 if data_key == 'mode' and signal_data[data_key]:
                     mode_val = signal_data[data_key]
                     
-                    # Convert numeric codes to user-friendly text
-                    if mode_val == '101':
-                        display_value = '5G NSA'
-                    elif mode_val == '38':
-                        display_value = 'NR/5G'
-                    elif mode_val == '7':
+                    # Check for actual active 5G NR bands with bandwidth > 0
+                    has_active_5g = False
+                    has_5g_bands = False
+                    has_lte_bands = False
+                    
+                    # Check if any 5G NR bands are active with non-zero bandwidth
+                    if ('nrdlbandwidth' in signal_data and signal_data['nrdlbandwidth'] and 
+                        signal_data['nrdlbandwidth'] not in ['--', '0', '0.0', '0MHz', '0.0MHz']):
+                        has_active_5g = True
+                        self.log_message(f"Detected active 5G NR with bandwidth: {signal_data['nrdlbandwidth']}", log_type="detailed")
+                    
+                    # Also check for 5G NR frequencies
+                    if ('nrdlfreq' in signal_data and signal_data['nrdlfreq'] and 
+                        signal_data['nrdlfreq'] not in ['--', '0', '0.0']):
+                        has_active_5g = True
+                        self.log_message(f"Detected active 5G NR with frequency: {signal_data['nrdlfreq']}", log_type="detailed")
+                    
+                    # Check for bands in band list
+                    if 'bands' in signal_data and signal_data['bands']:
+                        bands_list = signal_data['bands'].split(',')
+                        for band in bands_list:
+                            band = band.strip()
+                            if band.lower().startswith('n'):
+                                has_5g_bands = True
+                                self.log_message(f"Found 5G band in list: {band}", log_type="detailed")
+                            elif band.upper().startswith('B'):
+                                has_lte_bands = True
+                    
+                    # First check standard mode codes
+                    if mode_val == '101' or mode_val == '21':
+                        # These are standard 5G NSA codes, but verify 5G is actually active
+                        if has_active_5g or has_5g_bands:
+                            display_value = '5G NSA'
+                            self.log_message("Confirmed 5G NSA with active 5G components", log_type="detailed")
+                        else:
+                            display_value = '4G'
+                            self.log_message("Mode code indicates 5G NSA but no active 5G detected, showing 4G", log_type="detailed")
+                    elif mode_val == '22' or mode_val == '102':
+                        if has_active_5g or has_5g_bands:
+                            display_value = '5G SA'
+                        else:
+                            display_value = '4G'
+                            self.log_message("Mode code indicates 5G SA but no active 5G detected, showing 4G", log_type="detailed")
+                    elif mode_val == '38' or mode_val == '103':
+                        if has_active_5g or has_5g_bands:
+                            display_value = 'NR/5G'
+                        else:
+                            display_value = '4G'
+                            self.log_message("Mode code indicates 5G but no active 5G detected, showing 4G", log_type="detailed")
+                    elif mode_val == '7' or mode_val == '19':
                         display_value = '4G'
-                    elif mode_val == '1011':
+                    elif mode_val == '20' or mode_val == '1011':
                         display_value = '4G+'
+                    elif has_active_5g:
+                        # If we actually have active 5G components, show 5G regardless of mode code
+                        if has_lte_bands:
+                            display_value = '5G NSA'
+                            self.log_message(f"Detected active 5G with 4G bands despite mode code {mode_val}, showing 5G NSA", log_type="detailed")
+                        else:
+                            display_value = '5G'
+                            self.log_message(f"Detected active 5G despite mode code {mode_val}, showing 5G", log_type="detailed")
                     else:
-                        # Try to make other network types user-friendly
+                        # Comprehensive network types mapping
                         network_types = {
-                            "0": "No Service", "1": "GSM", "2": "GPRS", "3": "EDGE", "4": "WCDMA",
-                            "5": "HSDPA", "6": "HSUPA", "7": "4G", "8": "TD-SCDMA", "9": "HSPA+",
-                            "19": "LTE", "20": "LTE-CA (4G+)", "21": "5G NSA", "22": "5G SA"
+                            "0": "No Service", 
+                            "1": "GSM", 
+                            "2": "GPRS", 
+                            "3": "EDGE", 
+                            "4": "WCDMA",
+                            "5": "HSDPA", 
+                            "6": "HSUPA", 
+                            "7": "4G", 
+                            "8": "TD-SCDMA", 
+                            "9": "HSPA+",
+                            "19": "LTE", 
+                            "20": "LTE-CA (4G+)", 
+                            "21": "5G NSA", 
+                            "22": "5G SA",
+                            "23": "5G", 
+                            "00": "4G", # Changed from "5G NSA" to "4G" based on actual connection status
+                            "101": "5G NSA", 
+                            "102": "5G SA", 
+                            "103": "5G",
+                            "1011": "4G+"
                         }
                         display_value = network_types.get(str(mode_val), mode_val)
                     
+                    self.log_message(f"Network mode detected: {mode_val} → {display_value}", log_type="detailed")
                     self.signal_info[ui_key].set(display_value)
                 # Special handling for band to show all bands when available
                 elif data_key == 'band' and ui_key == 'BAND':
