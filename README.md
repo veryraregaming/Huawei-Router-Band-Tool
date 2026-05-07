@@ -2,6 +2,10 @@
 
 A powerful tool for optimising band selection to maximise signal quality and internet speeds on Huawei CPE Pro 2 routers.
 
+## Maintenance Status
+
+I no longer actively maintain this project because I no longer have access to the Huawei router hardware needed to test changes properly. Issues and pull requests may still be useful for anyone continuing development, but future fixes and compatibility work will need to be handled by other contributors.
+
 ## Features
 
 - **Band Optimisation:** Automatically tests all available bands and recommends the best combination based on signal quality
