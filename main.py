@@ -2504,6 +2504,90 @@ class BandOptimiserApp(tk.Frame):
             # Show error dialog
             messagebox.showerror("Connection Error", error_message)
 
+    def show_optimisation_summary(self, top_bands, results, report_path=None):
+        """Show basic optimisation summary."""
+        if not top_bands or not results:
+            self.log_message("No valid optimisation results to display", log_type="both")
+            return
+
+        dialogue = tk.Toplevel(self.master)
+        dialogue.title("Optimisation Results")
+        dialogue.geometry("500x400")
+        dialogue.minsize(500, 400)
+        dialogue.transient(self.master)
+        dialogue.grab_set()
+
+        frame = ttk.Frame(dialogue, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text="Band Optimisation Results",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(pady=(0, 10))
+
+        results_frame = ttk.Frame(frame)
+        results_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            results_frame,
+            text="Recommended Bands:",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky=tk.W, pady=(10, 5))
+
+        for index, band in enumerate(top_bands[:3], start=1):
+            band_result = results.get(band, {})
+            rsrp = band_result.get("rsrp", "N/A")
+            sinr = band_result.get("sinr", "N/A")
+            score = band_result.get("score", 0)
+
+            text = f"{index}. {band}: RSRP {rsrp} dBm, SINR {sinr} dB, Score {score:.1f}"
+            ttk.Label(results_frame, text=text).grid(
+                row=index, column=0, sticky=tk.W, pady=2
+            )
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=10)
+
+        best_band = top_bands[0]
+        ttk.Button(
+            button_frame,
+            text=f"Apply Best Band ({best_band})",
+            command=lambda: self.apply_optimised_band(best_band, dialogue),
+        ).pack(side=tk.LEFT, padx=5)
+
+        if report_path:
+            ttk.Button(
+                button_frame,
+                text="View Detailed Report",
+                command=lambda: self.open_report(report_path),
+            ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(button_frame, text="Close", command=dialogue.destroy).pack(
+            side=tk.RIGHT, padx=5
+        )
+
+    def apply_optimised_band(self, band, dialogue=None):
+        """Apply a single band selected from optimisation results."""
+        if not band:
+            self.log_message("No band selected to apply", log_type="both")
+            return
+
+        self.uncheck_all_bands()
+        if band in self.band_vars:
+            self.band_vars[band].set(True)
+
+        self.apply_band_selection()
+        if dialogue:
+            dialogue.destroy()
+
+    def open_report(self, report_path):
+        """Open an optimisation report in the default browser."""
+        if report_path and os.path.exists(report_path):
+            webbrowser.open("file://" + os.path.realpath(report_path))
+        else:
+            self.log_message("Report not found", log_type="both")
+
     def show_enhanced_optimisation_summary(
         self, results_4g, results_5g, recommended_results, report_path
     ):
@@ -4254,7 +4338,7 @@ class BandOptimiserApp(tk.Frame):
                 # Show optimisation summary dialogue
                 self.master.after(
                     0,
-                    lambda: self.show_enhanced_optimisation_summary(
+                    lambda: self.show_optimisation_summary(
                         top_bands, results, report_path
                     ),
                 )
